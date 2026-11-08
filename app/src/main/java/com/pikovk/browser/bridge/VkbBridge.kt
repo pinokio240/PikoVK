@@ -9,12 +9,20 @@ import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.widget.Toast
+import com.pikovk.browser.browser.AudioGrabber
+import com.pikovk.browser.media.PlaybackService
 
 // JS-мост расширений: window.VkbBridge.
 //
-// Единственный метод download(url): файл уходит в системный DownloadManager
-// (без лишних разрешений — они запрашиваются только по факту скачивания).
-// Скачивание всегда подтверждает пользователь в диалоге, домен не проверяется.
+// download(url): файл уходит в системный DownloadManager (без лишних
+// разрешений — они запрашиваются только по факту скачивания). Скачивание
+// всегда подтверждает пользователь в диалоге, домен не проверяется.
+//
+// 1.3.21:
+//   downloadAudioTrack(name) — кнопка «скачать» у строки Музыки: имя трека
+//       уходит в AudioGrabber, следующий адрес аудио-CDN качается под ним;
+//   playerState(title, artist, playing) — репорт встроенного плеера VK,
+//       питает медиашторку PlaybackService (MediaSession).
 //
 // Явность (1.3.1): nullable-значения проверяются через if, без `?:` и `!!`;
 // недоступный DownloadManager даёт IllegalStateException, которую ловит
@@ -25,31 +33,50 @@ class VkbBridge(private val context: Context) {
 
     @JavascriptInterface
     fun download(url: String) {
-        runCatching { enqueue(url) }
+        runCatching { VkbBridge.enqueueNamed(context, url, fileName(url)) }
             .onFailure { toast("Не удалось начать скачивание") }
     }
 
-    private fun enqueue(url: String) {
-        val dmService: Any? = context.getSystemService(Context.DOWNLOAD_SERVICE)
-        if (dmService !is DownloadManager) {
-            // Явный отказ вместо тихого ClassCastException: поймается выше
-            throw IllegalStateException("DownloadManager недоступен в системе")
+    // 1.3.21: кнопка у трека — включаем воспроизведение, ловим ссылку CDN.
+    @JavascriptInterface
+    fun downloadAudioTrack(name: String) {
+        AudioGrabber.requestFor(name)
+        toast("Готовлю скачивание: включаю трек…")
+    }
+
+    // 1.3.21: состояние плеера VK (вызывается из PLAYER_JS раз в 3 с).
+    @JavascriptInterface
+    fun playerState(title: String, artist: String, playing: String) {
+        PlaybackService.updateMeta(title, artist, playing == "1")
+    }
+
+    // Общая точка входа для скачиваний: используется и мостом, и
+    // AudioGrabber (кнопка у трека). Ошибка доступности DownloadManager
+    // бросается наружу — вызывающий показывает тост.
+    companion object {
+        fun enqueueNamed(ctx: Context, url: String, name: String) {
+            val dmService: Any? = ctx.getSystemService(Context.DOWNLOAD_SERVICE)
+            if (dmService !is DownloadManager) {
+                // Явный отказ вместо тихого ClassCastException: поймается выше
+                throw IllegalStateException("DownloadManager недоступен в системе")
+            }
+            val req = DownloadManager.Request(Uri.parse(url))
+            val agent: String? = System.getProperty("http.agent")
+            if (agent == null) {
+                req.addRequestHeader("User-Agent", "PikoVK/1.0")
+            } else {
+                req.addRequestHeader("User-Agent", agent)
+            }
+            val cookie: String? = CookieManager.getInstance().getCookie(url)
+            if (cookie != null) {
+                req.addRequestHeader("Cookie", cookie)
+            }
+            req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+            dmService.enqueue(req)
+            val ui = Handler(Looper.getMainLooper())
+            ui.post { Toast.makeText(ctx, "Скачивание началось: $name", Toast.LENGTH_SHORT).show() }
         }
-        val req = DownloadManager.Request(Uri.parse(url))
-        val agent: String? = System.getProperty("http.agent")
-        if (agent == null) {
-            req.addRequestHeader("User-Agent", "PikoVK/1.0")
-        } else {
-            req.addRequestHeader("User-Agent", agent)
-        }
-        val cookie: String? = CookieManager.getInstance().getCookie(url)
-        if (cookie != null) {
-            req.addRequestHeader("Cookie", cookie)
-        }
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName(url))
-        dmService.enqueue(req)
-        toast("Скачивание началось")
     }
 
     // Имя файла из последнего сегмента пути; пустое/отсутствующее — «vk_file».

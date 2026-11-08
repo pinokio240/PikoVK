@@ -3,6 +3,13 @@
 Лёгкий Android WebView-браузер для VK (Kotlin, `com.pikovk.browser`).
 Формат: свежие записи сверху. Детали реализации — в README.md.
 
+## 1.3.21 (versionCode 26) — музыка: скачивание треков + медиашторка
+
+- **Кнопки скачивания у треков** (по образцу VK Music Saver от VK Next): новая JS-секция `AUDIO_DL_JS` в `ExtensionEngine` — у каждой строки Музыки vk.ru/vk.com кнопка «↓»; клик передаёт «Исполнитель - Название» в `VkbBridge.downloadAudioTrack`, включает трек; `AudioGrabber` (новый, `browser/`) ловит в `shouldInterceptRequest` адрес аудио-CDN (vkuseraudio.net, .vk-cdn.net) и качает файл в «Загрузки» под этим именем. Тумблер «Кнопки скачивания у треков (Музыка VK)», по умолчанию включён. Ограничение честно: если трек уже загружен в плеер (пауза) — ссылки нет, нужен повторный клик.
+- **Переработанный плеер в шторке** (по образцу VK Next): `PlaybackService` получил `MediaSessionCompat` + `MediaStyle`-уведомление (новый канал `vkb_playback_ctrl`, IMPORTANCE_LOW) — исполнитель/название и кнопки «назад / пауза / вперёд» в шторке и на локскрине. Команды: `PlaybackService.attach(webView)` → `evaluateJavascript` → `window.__vkbPlayerCmd` (секция `PLAYER_JS`) кликает штатные кнопки плеера VK; метаданные обратно через `VkbBridge.playerState` (репорт раз в 3 с, только при изменении). Гарнитура/Bluetooth: play/pause/next/prev.
+- `POST_NOTIFICATIONS` теперь запрашивается и для медиашторки (Android 13+), даже если опрос уведомлений выключен.
+- Зависимость `androidx.media:media:1.7.0`. Контроль: `scripts/check_piko_1321.py`.
+
 ## 1.3.20 (versionCode 25) — личные сообщения в шторке
 
 - Новый `notify/ImPoller.kt`: опрос `m.vk.ru/im` с cookie активного профиля в общем цикле `NotifyService`, парсинг непрочитанных диалогов, дедупликация, лимит уведомлений за цикл.

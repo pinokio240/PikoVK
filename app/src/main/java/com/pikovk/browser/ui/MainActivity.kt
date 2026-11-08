@@ -31,6 +31,7 @@ import androidx.webkit.WebViewFeature
 import com.pikovk.browser.R
 import com.pikovk.browser.bridge.VkbBridge
 import com.pikovk.browser.browser.LinkSniffer
+import com.pikovk.browser.browser.AudioGrabber
 import com.pikovk.browser.browser.UserAgents
 import com.pikovk.browser.browser.VkWebChromeClient
 import com.pikovk.browser.browser.VkLinks
@@ -170,6 +171,11 @@ class MainActivity : AppCompatActivity() {
             requestNotificationPermissionIfNeeded()
             NotifyService.start(this)
         }
+        // 1.3.21: медиашторка — тоже уведомление; на Android 13+ спрашиваем
+        // разрешение и для неё, даже если опрос уведомлений выключен
+        if (Prefs.backgroundPlayback) {
+            requestNotificationPermissionIfNeeded()
+        }
     }
 
     // ------------------------------------------------------------------
@@ -217,6 +223,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         wv.addJavascriptInterface(bridge, "VkbBridge")
+        // 1.3.21: медиашторка командует этим WebView, AudioGrabber качает
+        // треки с контекстом приложения.
+        PlaybackService.attach(wv)
+        AudioGrabber.attach(this)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
 
         webContainer.addView(
@@ -581,6 +591,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         // 1.3.14: wake-lock больше не нужен — WebView (и звук) уничтожается
         PlaybackWakeLock.release()
+        // 1.3.21: ссылки на WebView больше нет — команды плееру некуда слать
+        PlaybackService.attach(null)
         // 1.3.10: приложение закрывается — WebView будет уничтожен, звука
         // больше нет; убираем уведомление службы воспроизведения
         PlaybackService.stop(this)

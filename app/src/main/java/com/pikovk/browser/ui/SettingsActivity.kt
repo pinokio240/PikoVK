@@ -123,6 +123,12 @@ class SettingsActivity : AppCompatActivity() {
         switchRow("Скачивание медиа (фото, видео, файлы)", Prefs.extMedia) {
             Prefs.extMedia = it; Prefs.markDirty()
         }
+        // 1.3.21: кнопки скачивания у треков VK Музыки (по образцу
+        // VK Music Saver от VK Next).
+        switchRow("Кнопки скачивания у треков (Музыка VK)", Prefs.extAudioDl) {
+            Prefs.extAudioDl = it; Prefs.markDirty()
+        }
+        hint("Как в VK Music Saver: у каждого трека в Музыке появляется кнопка ↓. Клик включает трек, PikoVK ловит прямую ссылку аудио-CDN и сохраняет файл в «Загрузки» под именем «Исполнитель - Название». Если трек уже загружен в плеер и стоит на паузе, ссылки может не быть — нажмите кнопку ещё раз. Применение — после возврата в браузер.")
         switchRow("Твики ленты: без стори, компактные посты", Prefs.extTweaks) {
             Prefs.extTweaks = it; Prefs.markDirty()
         }

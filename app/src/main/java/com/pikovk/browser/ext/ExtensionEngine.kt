@@ -64,6 +64,10 @@ object ExtensionEngine {
         if (Prefs.extDark) sb.append(DARK_JS)
         if (Prefs.extTweaks) sb.append(TWEAKS_JS)
         if (Prefs.extMedia) sb.append(MEDIA_JS)
+        // 1.3.21: кнопки скачивания у треков VK Музыки (по образцу
+        // VK Music Saver) и репортёр плеера для медиашторки.
+        if (Prefs.extAudioDl) sb.append(AUDIO_DL_JS)
+        if (Prefs.backgroundPlayback) sb.append(PLAYER_JS)
         if (Prefs.extAdBlock) sb.append(AD_BLOCK_JS)
         sb.append("})();")
         return sb.toString()
@@ -406,6 +410,167 @@ object ExtensionEngine {
               }
             }
           },true);
+        }catch(e){}
+    """.trimIndent()
+
+    // ------------------------------------------------------------------
+    // 1.3.21. Кнопки скачивания у треков VK Музыки (по образцу
+    // VK Music Saver от VK Next). Селекторы строк — кандидаты из разметки
+    // полной версии (vk.ru/vk.com) и мобильной (m.vk.ru); признак не
+    // совпал — кнопка просто не появляется (fail-open). Прямую ссылку на
+    // файл JS не знает: клик по кнопке передаёт имя трека в мост
+    // (VkbBridge.downloadAudioTrack) и включает воспроизведение строки;
+    // WebView сам запросит файл у аудио-CDN, сетевой слой (AudioGrabber)
+    // поймает адрес и отдаст файл в «Загрузки».
+    // Гейтинг по хосту — урок 1.3.19: кнопки только на vk.ru/vk.com,
+    // на vkvideo.ru и мини-аппах ничего не трогаем. Производительность —
+    // как у TWEAKS_JS: обсервер только по добавленным узлам, дебаунс 300 мс,
+    // проверенность в WeakSet.
+    // ------------------------------------------------------------------
+    private val AUDIO_DL_JS = """
+        try{
+          var vAdHost=location.hostname;
+          var vAdOk=(vAdHost==='vk.ru'||vAdHost==='vk.com'||vAdHost.indexOf('.vk.ru')>-1||vAdHost.indexOf('.vk.com')>-1);
+          if(vAdOk){
+            var vkbDlSt=document.createElement('style');
+            vkbDlSt.id='vkb-audiodl';
+            vkbDlSt.textContent='.vkb-dlbtn{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;margin:0 6px;padding:0 5px;border-radius:10px;cursor:pointer;opacity:.45;font:700 13px/20px sans-serif;color:var(--vkui--color_text_accent,#2688eb);vertical-align:middle;user-select:none}.vkb-dlbtn:hover{opacity:1}';
+            vkbMount(vkbDlSt);
+            var vkbDlSeen=new WeakSet();
+            var vkbDlQueue=[];
+            var vkbDlTimer=null;
+            function vkbAdFlush(){
+              vkbDlTimer=null;
+              try{
+                var q=vkbDlQueue;vkbDlQueue=[];
+                for(var i=0;i<q.length;i++){vkbAdScan(q[i]);}
+              }catch(e){}
+            }
+            function vkbAdObserve(muts){
+              try{
+                for(var i=0;i<muts.length;i++){
+                  var add=muts[i].addedNodes;
+                  for(var j=0;j<add.length;j++){
+                    var n=add[j];
+                    if(n.nodeType!==1||n.tagName==='SCRIPT'||n.tagName==='STYLE'){continue;}
+                    vkbDlQueue.push(n);
+                  }
+                }
+              }catch(e){}
+              if(vkbDlTimer){clearTimeout(vkbDlTimer);}
+              vkbDlTimer=setTimeout(vkbAdFlush,300);
+            }
+            function vkbAdText(el,list){
+              for(var i=0;i<list.length;i++){
+                var x=el.querySelector(list[i]);
+                if(x){var t=(x.textContent||'').trim();if(t){return t;}}
+              }
+              return '';
+            }
+            function vkbAdScan(root){
+              try{
+                var scope=(root&&root.querySelectorAll)?root:document;
+                var rows=scope.querySelectorAll('.audio_row,.audio_item');
+                var list=[];
+                for(var i=0;i<rows.length;i++){list.push(rows[i]);}
+                if(scope.matches&&scope.matches('.audio_row,.audio_item')){list.push(scope);}
+                for(var k=0;k<list.length;k++){
+                  var row=list[k];
+                  if(vkbDlSeen.has(row)){continue;}
+                  vkbDlSeen.add(row);
+                  if(row.querySelector('.vkb-dlbtn')){continue;}
+                  var btn=document.createElement('span');
+                  btn.className='vkb-dlbtn';
+                  btn.textContent='↓';
+                  btn.title='Скачать трек (PikoVK)';
+                  btn.addEventListener('click',function(ev){
+                    try{
+                      // Гасим всплытие: штатный клик по строке мог бы
+                      // переключить play/pause второй раз (двойной тогл).
+                      // Трек включаем единственным способом — play.click().
+                      ev.stopPropagation();
+                      ev.preventDefault();
+                      var tgt=ev.target;
+                      var r=(tgt&&tgt.closest)?tgt.closest('.audio_row,.audio_item'):null;
+                      var artist=r?vkbAdText(r,['.audio_artist','.audio_performer','.ai_artist']):'';
+                      var title=r?vkbAdText(r,['.audio_title_text','.audio_row__title','.ai_title']):'';
+                      var name=(artist&&title)?(artist+' - '+title):'vk_track';
+                      if(window.VkbBridge&&window.VkbBridge.downloadAudioTrack){window.VkbBridge.downloadAudioTrack(name);}
+                      var play=(r&&r.querySelector)?r.querySelector('.audio_row__play,.ai_play'):null;
+                      if(play){play.click();}
+                      else if(r){r.click();}
+                    }catch(e){}
+                  },false);
+                  row.appendChild(btn);
+                }
+              }catch(e){}
+            }
+            function vkbAdStart(){
+              vkbAdScan();
+              try{new MutationObserver(vkbAdObserve).observe(document.body,{childList:true,subtree:true});}catch(e){}
+            }
+            if(document.body){vkbAdStart();}
+            else{document.addEventListener('DOMContentLoaded',vkbAdStart,{once:true});}
+          }
+        }catch(e){}
+    """.trimIndent()
+
+    // ------------------------------------------------------------------
+    // 1.3.21. Репортёр плеера VK для медиашторки. Две задачи:
+    //   1) window.__vkbPlayerCmd(cmd) — команды из PlaybackService
+    //      (кнопки уведомления, гарнитура): кликаем штатные кнопки плеера
+    //      полной версии (audio_page_player_*). Команды play/pause честные:
+    //      JS сам знает состояние (класс playing) и жмёт кнопку только когда
+    //      это меняет состояние — кнопка паузы из шторки не включает трек
+    //      обратно.
+    //   2) репорт каждые 3 с: исполнитель/название/играет ли — через мост
+    //      VkbBridge.playerState в MediaSession. Отправляем только при
+    //      изменении. Плеера нет на странице — молчим (fail-open).
+    // Селекторы — кандидаты: основная разметка audio_page_player,
+    // запасные — по подстроке id. Как обычно: без '$' и шаблонных строк.
+    // ------------------------------------------------------------------
+    private val PLAYER_JS = """
+        try{
+          function vkbPlQ(list){
+            for(var i=0;i<list.length;i++){
+              var el=document.querySelector(list[i]);
+              if(el){return el;}
+            }
+            return null;
+          }
+          window.__vkbPlayerCmd=function(cmd){
+            try{
+              if(cmd==='next'||cmd==='prev'){
+                var b=vkbPlQ(cmd==='next'?['#audio_page_player_next','.audio_page_player_next']:['#audio_page_player_prev','.audio_page_player_prev']);
+                if(b){b.click();return;}
+              }
+              var p=vkbPlQ(['#audio_page_player_play','.audio_page_player_play']);
+              if(!p){return;}
+              var cls=' '+(p.className||'')+' ';
+              var playing=cls.indexOf('playing')>-1;
+              if(cmd==='toggle'){p.click();return;}
+              if(cmd==='pause'&&playing){p.click();return;}
+              if((cmd==='play'||cmd==='resume')&&!playing){p.click();return;}
+            }catch(e){}
+          };
+          var vkbPlT='';var vkbPlA='';var vkbPlP=false;
+          setInterval(function(){
+            try{
+              var pl=document.querySelector('#audio_page_player,.audio_page_player');
+              if(!pl){return;}
+              var tEl=vkbPlQ(['.audio_page_player_title .audio_title_text','.audio_page_player_title']);
+              var aEl=vkbPlQ(['.audio_page_performer','.audio_page_player_performer']);
+              var pEl=vkbPlQ(['.audio_page_player_play','.audio_page_player_pause']);
+              var playing=false;
+              if(pEl){playing=(' '+(pEl.className||'')+' ').indexOf('playing')>-1;}
+              var t=tEl?(tEl.textContent||'').trim():'';
+              var a=aEl?(aEl.textContent||'').trim():'';
+              if(t!==vkbPlT||a!==vkbPlA||playing!==vkbPlP){
+                vkbPlT=t;vkbPlA=a;vkbPlP=playing;
+                if(window.VkbBridge&&window.VkbBridge.playerState){window.VkbBridge.playerState(t,a,playing?'1':'0');}
+              }
+            }catch(e){}
+          },3000);
         }catch(e){}
     """.trimIndent()
 

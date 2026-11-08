@@ -20,6 +20,11 @@
     <string name="notif_watch_answers">реакциями, комментариями, ответами</string>
     <string name="notif_watch_messages">личными сообщениями</string>
     <string name="notif_channel_playback">Воспроизведение в фоне</string>
-    <string name="playback_notif_title">PikoVK играет в фоне</string>
     <string name="playback_notif_text">Аудио и видео продолжают воспроизводиться</string>
+    <string name="player_notif_default_title">PikoVK — плеер</string>
+    <string name="player_notif_source">PikoVK</string>
+    <string name="player_action_prev">Назад</string>
+    <string name="player_action_play">Играть</string>
+    <string name="player_action_pause">Пауза</string>
+    <string name="player_action_next">Вперёд</string>
 </resources>

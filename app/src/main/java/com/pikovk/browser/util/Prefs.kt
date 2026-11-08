@@ -70,6 +70,15 @@ object Prefs {
             e().putBoolean("ext_media", v).apply()
         }
 
+    // 1.3.21: кнопки скачивания у треков VK Музыки (по образцу VK Music
+    // Saver): клик включает трек, PikoVK ловит ссылку аудио-CDN и сохраняет
+    // файл в «Загрузки» под именем «Исполнитель - Название» (AudioGrabber).
+    var extAudioDl: Boolean
+        get() = sp.getBoolean("ext_audio_dl", true)
+        set(v) {
+            e().putBoolean("ext_audio_dl", v).apply()
+        }
+
     var extTweaks: Boolean
         get() = sp.getBoolean("ext_tweaks", false)
         set(v) {
