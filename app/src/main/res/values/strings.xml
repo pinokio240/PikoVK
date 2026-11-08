@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PikoVK</string>
+    <string name="url_hint">Поиск в VK или адрес</string>
+    <string name="back">Назад</string>
+    <string name="forward">Вперёд</string>
+    <string name="reload">Обновить</string>
+    <string name="home">Главная</string>
+    <string name="toggle_desktop">Полная / мобильная версия</string>
+    <string name="desktop_give_up">VK вернул мобильную версию — кнопка переключена обратно</string>
+    <string name="profiles">Профили</string>
+    <string name="settings">Настройки</string>
+    <string name="notif_channel_service">Фоновая работа</string>
+    <string name="notif_channel_reactions">Реакции</string>
+    <string name="notif_channel_comments">Комментарии</string>
+    <string name="notif_channel_replies">Ответы</string>
+    <string name="notif_channel_messages">Сообщения</string>
+    <string name="notif_service_title">PikoVK работает в фоне</string>
+    <string name="notif_service_prefix">Следит за</string>
+    <string name="notif_watch_answers">реакциями, комментариями, ответами</string>
+    <string name="notif_watch_messages">личными сообщениями</string>
+    <string name="notif_channel_playback">Воспроизведение в фоне</string>
+    <string name="playback_notif_title">PikoVK играет в фоне</string>
+    <string name="playback_notif_text">Аудио и видео продолжают воспроизводиться</string>
+</resources>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Монограмма PVK: белые буквы на синем фоне (#0077FF) -->
+    <!-- P -->
+    <path
+        android:pathData="M28,68 L28,40 L37,40 A7.5,7.5 0 0 1 37,55 L28,55"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <!-- V -->
+    <path
+        android:pathData="M49,40 L58,68 L67,40"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <!-- K: стойка -->
+    <path
+        android:pathData="M73,40 L73,68"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <!-- K: диагонали -->
+    <path
+        android:pathData="M81,40 L73,54 L81,68"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>
