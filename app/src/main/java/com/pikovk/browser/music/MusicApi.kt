@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.webkit.CookieManager
+import com.pikovk.browser.browser.UserAgents
 import com.pikovk.browser.util.Prefs
 import com.pikovk.browser.util.SimpleHttp
 import org.json.JSONArray
@@ -96,9 +97,12 @@ object MusicApi {
     }
 
     private fun agent(): String {
-        val a: String? = System.getProperty("http.agent")
-        if (a == null) return "PikoVK/1.0"
-        return a
+        // 1.3.23 фикс: ходим с тем же UA, что и WebView браузера, —
+        // web-сессия VK выдана именно этому UA (у расширения запрос идёт
+        // из контекста страницы, то есть с UA браузера). Dalvik-UA мог
+        // отклоняться на web_token.
+        if (Prefs.desktopMode) return UserAgents.DESKTOP_UA
+        return Prefs.effectiveMobileUa()
     }
 
     // ------------------------------------------------------------------
@@ -161,8 +165,17 @@ object MusicApi {
     // ------------------------------------------------------------------
 
     fun myMusic(offset: Int): JSONObject? {
-        val uid = Prefs.musicUserId
-        if (uid == 0L) return null
+        // 1.3.23 фикс: uid проставляется только внутри token(). Раньше
+        // выходили при uid==0 ЕЩЁ ДО попытки токена — «Моя музыка» на
+        // первом запуске падала навсегда: треков нет, плеер не стартует,
+        // стрелки скачивания не рисуются (они на строках треков).
+        var uid = Prefs.musicUserId
+        if (uid == 0L) {
+            val tkn = token()
+            if (tkn == null) return null
+            uid = Prefs.musicUserId
+            if (uid == 0L) return null
+        }
         val p = HashMap<String, String>()
         p["owner_id"] = uid.toString()
         p["count"] = "50"
@@ -179,8 +192,14 @@ object MusicApi {
     }
 
     fun playlists(offset: Int): JSONObject? {
-        val uid = Prefs.musicUserId
-        if (uid == 0L) return null
+        // 1.3.23 фикс: как в myMusic — сначала добываем токен, потом uid
+        var uid = Prefs.musicUserId
+        if (uid == 0L) {
+            val tkn = token()
+            if (tkn == null) return null
+            uid = Prefs.musicUserId
+            if (uid == 0L) return null
+        }
         val p = HashMap<String, String>()
         p["owner_id"] = uid.toString()
         p["count"] = "25"
