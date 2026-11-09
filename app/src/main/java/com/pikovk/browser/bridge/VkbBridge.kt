@@ -9,7 +9,6 @@ import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.widget.Toast
-import com.pikovk.browser.browser.AudioGrabber
 import com.pikovk.browser.media.PlaybackService
 import com.pikovk.browser.util.Prefs
 
@@ -19,11 +18,8 @@ import com.pikovk.browser.util.Prefs
 // разрешений — они запрашиваются только по факту скачивания). Скачивание
 // всегда подтверждает пользователь в диалоге, домен не проверяется.
 //
-// 1.3.21:
-//   downloadAudioTrack(name) — кнопка «скачать» у строки Музыки: имя трека
-//       уходит в AudioGrabber, следующий адрес аудио-CDN качается под ним;
-//   playerState(title, artist, playing) — репорт встроенного плеера VK,
-//       питает медиашторку PlaybackService (MediaSession).
+// 1.3.21: playerState(title, artist, playing) — репорт плеера, питает
+//       медиашторку PlaybackService (MediaSession).
 //
 // Явность (1.3.1): nullable-значения проверяются через if, без `?:` и `!!`;
 // недоступный DownloadManager даёт IllegalStateException, которую ловит
@@ -36,13 +32,6 @@ class VkbBridge(private val context: Context) {
     fun download(url: String) {
         runCatching { VkbBridge.enqueueNamed(context, url, fileName(url)) }
             .onFailure { toast("Не удалось начать скачивание") }
-    }
-
-    // 1.3.21: кнопка у трека — включаем воспроизведение, ловим ссылку CDN.
-    @JavascriptInterface
-    fun downloadAudioTrack(name: String) {
-        AudioGrabber.requestFor(name)
-        toast("Готовлю скачивание: включаю трек…")
     }
 
     // 1.3.21: состояние плеера VK (вызывается из PLAYER_JS раз в 3 с).
@@ -65,8 +54,8 @@ class VkbBridge(private val context: Context) {
         }
     }
 
-    // Общая точка входа для скачиваний: используется и мостом, и
-    // AudioGrabber (кнопка у трека). Ошибка доступности DownloadManager
+    // Общая точка входа для скачиваний (используется и экраном «Музыка»).
+    // Ошибка доступности DownloadManager
     // бросается наружу — вызывающий показывает тост.
     companion object {
         fun enqueueNamed(ctx: Context, url: String, name: String) {

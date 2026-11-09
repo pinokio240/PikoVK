@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Экран «Музыка» (1.3.23): отдельная вкладка-плеер, WebView с
+     assets/music.html на весь экран -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/musicContainer"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#141414" />

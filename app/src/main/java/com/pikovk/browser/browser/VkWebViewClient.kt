@@ -141,13 +141,6 @@ class VkWebViewClient(private val activity: MainActivity) : WebViewClient() {
         if (request.isForMainFrame) {
             LinkSniffer.sniff(LinkSniffer.EVENT_REQUEST, request.url.toString())
         }
-        // 1.3.21: наблюдение за адресами аудио-CDN (vkuseraudio.net,
-        // .vk-cdn.net) для кнопки «скачать» у трека. Ответ НЕ меняем —
-        // файл по-прежнему грузит сам WebView, мы только запоминаем адрес
-        // (AudioGrabber.see при готовом запросе сразу начинает скачивание).
-        if (Prefs.extAudioDl && AudioGrabber.isAudioUrl(request.url.toString())) {
-            AudioGrabber.see(request.url.toString())
-        }
         // Уровень 2 «Блокировки рекламы» (включена по умолчанию): режем
         // известные счётчики и — с 1.3.17 — рекламные эндпоинты VK.
         // Диагностика — фильтр logcat "PikoVK-AdBlock".

@@ -3,6 +3,17 @@
 Лёгкий Android WebView-браузер для VK (Kotlin, `com.pikovk.browser`).
 Формат: свежие записи сверху. Детали реализации — в README.md.
 
+## 1.3.23 (versionCode 28) — вкладка-плеер «Музыка» (VK Music Player), старые кнопки скачивания убраны
+
+- Симптом владельца: «скачивание аудио нормально не работает ни в мобильной, ни в полной версии; значок скачивания накладывается на элементы трека; сделай отдельной вкладкой, чтобы был весь функционал VK Music Player».
+- **УБРАНО полностью**: JS-секция `AUDIO_DL_JS` (кнопки «↓» в страницах VK — источник наложения на элементы), тумблер «Кнопки скачивания у треков», `AudioGrabber`, `VkbBridge.downloadAudioTrack`. Страницы VK больше не трогаются вовсе.
+- **НОВАЯ вкладка «Музыка»** (кнопка-нота на нижней панели, `music/MusicActivity` + `assets/music.html`, тёмная тема): собственный плеер ВНЕ страниц VK, по образцу VK Music Player от VK Next. Функционал: «Моя музыка» (audio.get, пачки по 50, бесконечный скролл), поиск (audio.search, дебаунс 400 мс), плейлисты (audio.getPlaylists → audio.get по album_id) с входом/выходом, обложки (album.thumb.photo_300), значки битрейта (~Nk, как в расширении), серые строки для ограниченных/DMCA треков. Плеер: play/pause/next/prev, seek, шаффл (Фишер–Йетс с выводом текущего трека вперёд), повтор (выкл/все/один), тайминги, обложка в нижней панели. Скачивание: у каждого трека кнопка «⤓» В НАШЕМ UI (страницы VK не затрагиваются) — mp3 в «Загрузки» через DownloadManager, HLS — сегменты в один .ts в «Загрузки» (MediaStore на Android 10+, файл на 8–9; конвертации в mp3 нет — её у VK Next делают ffmpeg.wasm/сервер; .ts играют VLC/MX Player).
+- **Механизм 1:1 из VK Music Player** (CRX распакован, ключевые фрагменты сверены вручную + тест эквивалентности на 303 случая): web-токен `POST login.vk.ru/?act=web_token` (version=1&app_id=6287487, cookie веб-сессии, Origin vk.ru) → API `POST api.vk.ru/method/*?client_id=6287487` (v=5.251, lang=ru, retry 6/9/10), ссылка трека: `audio_streams[type=hls_ts].url` иначе `url`, маскированные ссылки разворачивает дословный порт `audioUnmaskSource` (алфавит сверён с бандлом), битрейт: mp3 — Content-Length*8/длительность, HLS — один сегмент (байты*8*(total/сегм)/1000), кэш по rawId.
+- **HLS в WebView**: hls.js 1.5.20 (light, BSD) в assets; CORS для XHR-сегментов открывает `shouldInterceptRequest` — `Access-Control-Allow-Origin:*` ТОЛЬКО к ответам аудио-CDN (vkuser.net/vkuseraudio.ru/userapi.com/okcdn.ru/...) — эквивалент DNR-правила 8 расширения; остальное насквозь.
+- Медиашторка/гарнитура работают без изменений: `music.html` реализует тот же протокол `window.__vkbPlayerCmd` и репортит метаданные через `VkbMusic.playerState` (та же логика упреждающего запуска FGS, 1.3.22). `PlaybackService` не менялся.
+- Поведение: поворот экрана плеер не пересоздаёт (configChanges); wake-lock/служба управляются MainActivity (вкладка всегда поверх неё); ЗАКРЫТИЕ вкладки останавливает музыку (WebView живёт в активности; непрерывное фоновое воспроизведение после закрытия — кандидат на отдельную версию: свой плеер в службе).
+- Контроль: `scripts/check_piko_1323.py`, `scripts/test_unmask_port.py`. Новый код: `music/MusicApi.kt`, `music/MusicBridge.kt`, `music/MusicActivity.kt`, `assets/music.html`, `assets/hls.min.js`, `res/layout/activity_music.xml`, `res/drawable/ic_music.xml`.
+
 ## 1.3.22 (versionCode 27) — фикс: звук при заблокированном экране
 
 - Симптом владельца: «при блокировке экрана аудио не воспроизводится» (при свёрнутом приложении с включённым экраном звук был, при блокировке — нет).

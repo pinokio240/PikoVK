@@ -43,6 +43,16 @@
             android:name=".ui.SettingsActivity"
             android:exported="false" />
 
+        <!-- Отдельная вкладка-плеер «Музыка» (1.3.23): собственный UI
+             на assets/music.html, данные через web_token API.
+             configChanges — как у MainActivity: поворот экрана не должен
+             пересоздавать плеер и обрывать музыку -->
+        <activity
+            android:name=".music.MusicActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode" />
+
         <!-- Фоновый опрос уведомлений VK (собственная сессия пользователя) -->
         <service
             android:name=".notify.NotifyService"

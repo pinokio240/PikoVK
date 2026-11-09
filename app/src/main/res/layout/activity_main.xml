@@ -95,6 +95,15 @@
             android:src="@drawable/ic_desktop" />
 
         <ImageButton
+            android:id="@+id/btnMusic"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/music"
+            android:src="@drawable/ic_music" />
+
+        <ImageButton
             android:id="@+id/btnProfiles"
             android:layout_width="0dp"
             android:layout_height="match_parent"

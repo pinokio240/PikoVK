@@ -10,6 +10,7 @@
     <string name="desktop_give_up">VK вернул мобильную версию — кнопка переключена обратно</string>
     <string name="profiles">Профили</string>
     <string name="settings">Настройки</string>
+    <string name="music">Музыка</string>
     <string name="notif_channel_service">Фоновая работа</string>
     <string name="notif_channel_reactions">Реакции</string>
     <string name="notif_channel_comments">Комментарии</string>

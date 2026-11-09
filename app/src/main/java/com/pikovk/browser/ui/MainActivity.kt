@@ -31,7 +31,6 @@ import androidx.webkit.WebViewFeature
 import com.pikovk.browser.R
 import com.pikovk.browser.bridge.VkbBridge
 import com.pikovk.browser.browser.LinkSniffer
-import com.pikovk.browser.browser.AudioGrabber
 import com.pikovk.browser.browser.UserAgents
 import com.pikovk.browser.browser.VkWebChromeClient
 import com.pikovk.browser.browser.VkLinks
@@ -138,6 +137,10 @@ class MainActivity : AppCompatActivity() {
             if (wv != null) wv.reload()
         }
         findViewById<ImageButton>(R.id.btnHome).setOnClickListener { loadUrl(homeUrl) }
+        // 1.3.23: отдельная вкладка-плеер «Музыка» (по образцу VK Music Player)
+        findViewById<ImageButton>(R.id.btnMusic).setOnClickListener {
+            startActivity(Intent(this, com.pikovk.browser.music.MusicActivity::class.java))
+        }
         findViewById<ImageButton>(R.id.btnProfiles).setOnClickListener { showProfilesDialog() }
         findViewById<ImageButton>(R.id.btnProfiles).setOnLongClickListener { confirmLogoutCurrent(); true }
         findViewById<ImageButton>(R.id.btnSettings).setOnClickListener {
@@ -223,10 +226,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
         wv.addJavascriptInterface(bridge, "VkbBridge")
-        // 1.3.21: медиашторка командует этим WebView, AudioGrabber качает
-        // треки с контекстом приложения.
+        // 1.3.21: медиашторка командует этим WebView.
         PlaybackService.attach(wv)
-        AudioGrabber.attach(this)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
 
         webContainer.addView(
@@ -533,6 +534,12 @@ class MainActivity : AppCompatActivity() {
         PlaybackWakeLock.release()
         // 1.3.10: приложение снова на экране — служба воспроизведения не нужна
         PlaybackService.stop(this)
+        // 1.3.23: возвращаем шторке ссылку на браузерный WebView — если только
+        // что закрыли вкладку «Музыка», команды шторки снова идут в страницу VK
+        val wvNow = webView
+        if (wvNow != null) {
+            PlaybackService.attach(wvNow)
+        }
     }
 
     override fun onStop() {

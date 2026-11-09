@@ -70,19 +70,35 @@ object Prefs {
             e().putBoolean("ext_media", v).apply()
         }
 
-    // 1.3.21: кнопки скачивания у треков VK Музыки (по образцу VK Music
-    // Saver): клик включает трек, PikoVK ловит ссылку аудио-CDN и сохраняет
-    // файл в «Загрузки» под именем «Исполнитель - Название» (AudioGrabber).
-    var extAudioDl: Boolean
-        get() = sp.getBoolean("ext_audio_dl", true)
-        set(v) {
-            e().putBoolean("ext_audio_dl", v).apply()
-        }
-
     var extTweaks: Boolean
         get() = sp.getBoolean("ext_tweaks", false)
         set(v) {
             e().putBoolean("ext_tweaks", v).apply()
+        }
+
+    // ---------- Экран «Музыка» (1.3.23) ----------
+    // web-токен VK (login.vk.ru?act=web_token, app_id 6287487) — как в
+    // VK Music Player: минтится из cookie веб-сессии, кэшируется до expires.
+    var musicToken: String
+        get() {
+            val s: String? = sp.getString("music_token", "")
+            if (s == null) return ""
+            return s
+        }
+        set(v) {
+            e().putString("music_token", v).apply()
+        }
+
+    var musicTokenExp: Long
+        get() = sp.getLong("music_token_exp", 0)
+        set(v) {
+            e().putLong("music_token_exp", v).apply()
+        }
+
+    var musicUserId: Long
+        get() = sp.getLong("music_user_id", 0)
+        set(v) {
+            e().putLong("music_user_id", v).apply()
         }
 
     // ---------- Версия сайта и User-Agent ----------
