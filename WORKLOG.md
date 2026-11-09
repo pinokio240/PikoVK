@@ -13,6 +13,7 @@
 - Медиашторка/гарнитура работают без изменений: `music.html` реализует тот же протокол `window.__vkbPlayerCmd` и репортит метаданные через `VkbMusic.playerState` (та же логика упреждающего запуска FGS, 1.3.22). `PlaybackService` не менялся.
 - Поведение: поворот экрана плеер не пересоздаёт (configChanges); wake-lock/служба управляются MainActivity (вкладка всегда поверх неё); ЗАКРЫТИЕ вкладки останавливает музыку (WebView живёт в активности; непрерывное фоновое воспроизведение после закрытия — кандидат на отдельную версию: свой плеер в службе).
 - Контроль: `scripts/check_piko_1323.py`, `scripts/test_unmask_port.py`. Новый код: `music/MusicApi.kt`, `music/MusicBridge.kt`, `music/MusicActivity.kt`, `assets/music.html`, `assets/hls.min.js`, `res/layout/activity_music.xml`, `res/drawable/ic_music.xml`.
+- Фикс компиляции (сборка владельца): в `MusicActivity` забыли `import androidx.activity.addCallback` — без него лямбда `addCallback(this) {}` не резолвится (в `MainActivity` импорт был, там поэтому собиралось); в `MusicApi.unmask` smart cast по `var vals`, переприсваиваемой в цикле, компилятор не держит — null гасится явно (`val decoded` + отдельная проверка), дальше `vals` живёт как заведомо не-NULL `String`.
 
 ## 1.3.22 (versionCode 27) — фикс: звук при заблокированном экране
 

@@ -371,9 +371,14 @@ object MusicApi {
             if (extraIdx < 0) return url
             val parts = url.substring(extraIdx + 7).split("#")
             if (parts.size < 2) return url
-            var vals = vkB64Decode(parts[0])
+            // фикс компиляции: smart cast по var, переприсваиваемой в цикле,
+            // компилятор не держит — гасим null ЯВНО и дальше vals живёт как
+            // заведомо не-NULL String
+            val decoded: String? = vkB64Decode(parts[0])
+            if (decoded == null) return url
+            var vals: String = decoded
             val opsRaw: String? = if (parts[1].isEmpty()) "" else vkB64Decode(parts[1])
-            if (vals == null || opsRaw == null) return url
+            if (opsRaw == null) return url
             if (opsRaw.isNotEmpty()) {
                 val ops = opsRaw.split("\t")
                 var i = ops.size - 1

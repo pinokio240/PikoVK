@@ -7,6 +7,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import com.pikovk.browser.R
 import com.pikovk.browser.media.PlaybackService
@@ -67,6 +68,9 @@ class MusicActivity : AppCompatActivity() {
         PlaybackService.attach(wv)
         wv.loadUrl("file:///android_asset/music.html")
 
+        // ktx-версия addCallback — как в MainActivity (нужен импорт
+        // androidx.activity.addCallback, без него компилятор ждёт
+        // OnBackPressedCallback и падает с Type mismatch)
         onBackPressedDispatcher.addCallback(this) {
             finish()
         }
