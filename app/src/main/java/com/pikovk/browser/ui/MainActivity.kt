@@ -546,7 +546,9 @@ class MainActivity : AppCompatActivity() {
         // обрывалась, вкладка сбрасывалась. Если играет страница VK — служба
         // останется и на экране: это дешевле, чем терять звук; погаснет на
         // ближайшем onStart, когда воспроизведение остановится.
-        if (!PlaybackService.isPlaying()) {
+        // nativeActive — нативный трек службы (даже на паузе): его тоже
+        // не глушим, карточка умеет продолжить.
+        if (!PlaybackService.isPlaying() && !PlaybackService.nativeActive) {
             PlaybackService.stop(this)
         }
         // 1.3.23: возвращаем шторке ссылку на браузерный WebView — если только
@@ -628,9 +630,10 @@ class MainActivity : AppCompatActivity() {
         // музыка играет. Раньше onDestroy безусловно гасил службу: процесс
         // падал в кэш, замораживался (Android 12+), фантомный киллер добивал
         // рендерер — звук обрывался, вкладка сбрасывалась. Теперь глушим
-        // только если звук — НЕ вкладка «Музыка»; свою смерть она отработает
-        // сама в своём onDestroy.
-        val musicOwnsSound = PlaybackService.fromMusicTab && PlaybackService.isPlaying()
+        // только если звук — НЕ вкладка «Музыка» и НЕ нативный движок
+        // службы; свою смерть вкладка отработает сама в своём onDestroy.
+        val musicOwnsSound = PlaybackService.nativeActive ||
+            (PlaybackService.fromMusicTab && PlaybackService.isPlaying())
         if (!musicOwnsSound) {
             // 1.3.14: wake-lock больше не нужен — WebView (и звук) уничтожается
             PlaybackWakeLock.release()

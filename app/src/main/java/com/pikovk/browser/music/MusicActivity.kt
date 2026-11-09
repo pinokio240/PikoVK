@@ -22,18 +22,18 @@ import java.net.URL
 // Отдельная вкладка-плеер «Музыка» (1.3.23) — по образцу VK Music Player
 // (VK Next): музыка живёт НЕ на странице VK, а в собственном UI на
 // assets/music.html. Данные и ссылки — MusicApi (web_token + audio.*),
-// воспроизведение — <audio> внутри нашего WebView (HLS — через
-// hls.js из assets), медиашторка — тот же PlaybackService.
+// воспроизведение — НАТИВНЫЙ MediaPlayer в PlaybackService (1.3.23): вкладка
+// — пульт (nativePlay/nativePause/…), звук не зависит от жизни WebView.
 //
-// Почему звук не пропадает при блокировке экрана: страница наша, она не
-// получает сигналов «скрыта» (PlaybackWebView подменяет видимость окна,
-// как и в 1.3.18), служба запускается мостом в момент старта трека
-// (упреждение 1.3.22), wake-lock держится, пока экран не на переднем плане.
+// Почему звук не пропадает при блокировке экрана: он вообще не в WebView.
+// Служба (FGS mediaPlayback) играет сама, держит wake-lock, аудиофокус и
+// MediaSession-шторку; WebView может быть убит/заморожен — трек продолжит
+// играть, карточка в шторке управляет службой напрямую.
 //
-// Клики CORS: hls.js качает сегменты XHR'ом с origin file:// — CDN VK
-// (vkuser.net и родственные) не отдаёт Access-Control-Allow-Origin, поэтому
-// shouldInterceptRequest добавляет ACAO:* ТОЛЬКО к ответам аудио-CDN
-// (эквивалент DNR-правила 8 расширения). Всё остальное проходит насквозь.
+// Клики CORS: HLS-сегменты для НАТИВОГО плеера не нужны (MediaPlayer
+// качает сам, без CORS), остаётся общий транзит — shouldInterceptRequest
+// добавляет ACAO:* ТОЛЬКО к ответам аудио-CDN (обложки/пробы битрейта
+// из XHR страницы); всё остальное проходит насквозь.
 class MusicActivity : AppCompatActivity() {
 
     private var web: WebView? = null
@@ -121,10 +121,14 @@ class MusicActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        // вкладка закрыта — WebView уничтожается, звука больше нет:
-        // гасим медиашторку, чтобы не висела с мёртвыми кнопками
-        PlaybackService.attach(null)
-        PlaybackService.stop(this)
+        // вкладка закрыта — WebView умирает, но звук теперь живёт в службе:
+        // трек продолжает играть (как у настоящих плееров), карточка снова
+        // откроет вкладку, и она синхронизируется через syncPlayer. Гасим
+        // шторку только когда играть нечем.
+        PlaybackService.detachMusicTab()
+        if (!PlaybackService.nativeActive) {
+            PlaybackService.stop(this)
+        }
         val wv = web
         if (wv != null) {
             container.removeView(wv)
@@ -142,14 +146,16 @@ class MusicActivity : AppCompatActivity() {
         // выглядело как «плеер скинулся» при блокировке/сворачивании: под
         // давлением памяти систему первой убивает именно дочерний рендерер.
         // Возвращаем true и тихо пересобираем вкладку — как в браузере
-        // (VkWebViewClient.onRenderProcessGone). Очередь плеера живёт в JS
-        // страницы и не восстанавливается — зато приложение остаётся живым,
-        // а шторка честно гаснет (звука больше нет).
+        // (VkWebViewClient.onRenderProcessGone). Сама музыка теперь не в
+        // WebView — она НЕ ОБРЫВАЕТСЯ. Очередь плеера живёт в JS страницы и
+        // не восстанавливается — текущий трек подтянется из службы.
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
             Log.w("PikoVK-Music", "Процесс рендера вкладки «Музыка» пропал — пересобираю WebView")
-            // флаг «играет» в службе теперь ложь — иначе карточка висит
-            // с кнопками в никуда, а страховка onStop не пускает службу
-            PlaybackService.updateMeta("", "", false)
+            // флаг «играет» гасим только если звук НЕ нативный (иначе служба
+            // честно играет, а карточка стала бы врать про паузу)
+            if (!PlaybackService.nativeActive) {
+                PlaybackService.updateMeta("", "", false)
+            }
             buildPlayerWebView()
             return true
         }

@@ -8,7 +8,6 @@ import android.webkit.WebView
 import android.widget.Toast
 import com.pikovk.browser.bridge.VkbBridge
 import com.pikovk.browser.media.PlaybackService
-import com.pikovk.browser.util.Prefs
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -21,11 +20,15 @@ import org.json.JSONObject
 //   pltracks(payload)       — треки плейлиста {owner, id, key, offset}
 //   probe(rawId, url, hls, duration) — проба битрейта (кэш в MusicApi)
 //   download(payload)       — скачивание {url, hls, name, rawId}
-//   playerState(t, a, p)    — метаданные в PlaybackService (медиашторка)
+//   nativePlay(payload)     — ИГРАТЬ трек в службе {url,title,artist,
+//                             duration,rawId,seek} (1.3.23)
+//   nativePause/nativeResume/nativeSeek(sec) — управление движком службы
+//   syncPlayer()            — свежая вкладка забирает состояние службы
 //
 // Ответы уходят в страницу одним способом: evaluateJavascript
 // window.__vkbMusicData(<json>) — как в VK Music Player данные плеера
-// приходят в UI одним каналом.
+// приходят в UI одним каналом. Позицию трека служба пушит сама (тикер в
+// PlaybackService → window.__vkbMusicPos).
 //
 // fail-open: ошибки сети/JSON не роняют страницу — в UI уходит
 // {kind, ok:false, error}. Явные null-проверки, без ?: и !!.
@@ -194,16 +197,49 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         }
     }
 
-    // Метаданные трека -> медиашторка. Логика та же, что в VkbBridge.playerState:
-    // старт службы, ПОКА экран музыки виден (Android 17 hardening, 1.3.22).
+    // 1.3.23: воспроизведение уехало в службу (нативный MediaPlayer).
+    // Вкладка — пульт: отдала трек и управляет; звук не зависит от жизни
+    // WebView. Старт службы ПОКА экран виден — тот же принцип упреждения
+    // 1.3.22 (Android «Background audio hardening»).
     @JavascriptInterface
-    fun playerState(title: String, artist: String, playing: String) {
-        PlaybackService.updateMeta(title, artist, playing == "1")
-        if (playing == "1" && Prefs.backgroundPlayback) {
-            val alive = PlaybackService.isRunning()
-            if (!alive) {
-                PlaybackService.start(context)
-            }
+    fun nativePlay(payload: String) {
+        try {
+            PlaybackService.nPlay(context, payload)
+        } catch (_: Exception) {
+        }
+    }
+
+    @JavascriptInterface
+    fun nativePause() {
+        try {
+            PlaybackService.nPause()
+        } catch (_: Exception) {
+        }
+    }
+
+    @JavascriptInterface
+    fun nativeResume() {
+        try {
+            PlaybackService.nResume()
+        } catch (_: Exception) {
+        }
+    }
+
+    @JavascriptInterface
+    fun nativeSeek(sec: Double) {
+        try {
+            PlaybackService.nSeek(sec)
+        } catch (_: Exception) {
+        }
+    }
+
+    // Свежая вкладка (переоткрытие после закрытия/смерти рендерера)
+    // забирает текущее состояние службы — карточка в UI оживает.
+    @JavascriptInterface
+    fun syncPlayer() {
+        try {
+            respond(webHolder(), PlaybackService.nativeState())
+        } catch (_: Exception) {
         }
     }
 }
