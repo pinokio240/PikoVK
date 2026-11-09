@@ -126,7 +126,10 @@ class PlaybackService : Service() {
             if (self == null) return
             if (nativeActive) {
                 // позиция читается только здесь, на main — и кэшируется в
-                // lastPos для шторки/страницы/nativeState (JS-поток моста)
+                // lastPos для шторки/страницы/nativeState (JS-поток моста).
+                // ЕДИНИЦЫ — СЕКУНДЫ (см. readPosition): раньше сюда попадали
+                // миллисекунды MediaPlayer, и вкладка после возврата из фона
+                // показывала время-белиберду и ползунок в упоре
                 lastPos = readPosition()
                 updateSessionState()
                 pushPosToPage()
@@ -568,9 +571,11 @@ class PlaybackService : Service() {
     }
 
     // «Назад» из шторки/гарнитуры/вкладки: в начале трека — в начало,
-    // иначе предыдущий (как у обычных плееров)
+    // иначе предыдущий (как у обычных плееров; порог 3 секунды — тот же
+    // паттерн, что в PinoK). lastPos теперь в секундах — раньше порог
+    // «3000» означал 3 миллисекунды и «назад» всегда листало трек.
     private fun prevFromNotif() {
-        if (lastPos > 3000) {
+        if (lastPos > 3) {
             seekNative(0.0)
         } else {
             shiftQueue(-1, false)
@@ -744,11 +749,18 @@ class PlaybackService : Service() {
 
     // main-поток: текущая позиция движка (0, если плеера нет). Единственная
     // точка касания MediaPlayer вне создания — плеер не потокобезопасен.
+    // 1.3.23 доработка-2: ВНУТРИ СЛУЖБЫ ПОЗИЦИЯ ХРАНИТСЯ В СЕКУНДАХ — как
+    // lastDur (тоже секунды). Раньше readPosition отдавала миллисекунды
+    // MediaPlayer без конвертации: в pushPosToPage/nativeState уходили мс,
+    // страница делила их на длительность в секундах — после возврата из
+    // фона таймер показывал «белиберду» вида 51:23:20, а ползунок упирался
+    // в 100%. Миллисекунды нужны только MediaSession-шторке — там
+    // конвертируем на месте (updateSessionState, onSeekTo).
     private fun readPosition(): Long {
         val mp = player
         if (mp == null) return 0
         return try {
-            mp.currentPosition.toLong()
+            mp.currentPosition / 1000L
         } catch (_: Exception) {
             0
         }
@@ -774,7 +786,8 @@ class PlaybackService : Service() {
                     or PlaybackStateCompat.ACTION_SKIP_TO_NEXT
                     or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
             )
-            .setState(state, lastPos, speed)
+            // шторке нужна позиция в миллисекундах: lastPos хранит секунды
+            .setState(state, lastPos * 1000L, speed)
             .build()
         session.setPlaybackState(ps)
     }

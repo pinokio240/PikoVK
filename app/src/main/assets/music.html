@@ -210,9 +210,14 @@ function ask(kind, extra, cb){
     if (kind==='tracks') window.VkbMusic.load(p.offset|0, id, p.append?1:0);
     else if (kind==='search') window.VkbMusic.search(p.q||'', p.offset|0, id, p.append?1:0);
     else if (kind==='playlists') window.VkbMusic.playlists(p.offset|0, id, p.append?1:0);
-    else if (kind==='pltracks') window.VkbMusic.pltracks(JSON.stringify({owner:p.owner,id:p.id,key:p.key}), id, p.append?1:0);
+    else if (kind==='pltracks') window.VkbMusic.pltracks(JSON.stringify({owner:p.owner,id:p.id,key:p.key,offset:p.offset|0}), id, p.append?1:0);
     else if (kind==='probe') window.VkbMusic.probe(p.rawId, p.url, p.hls?1:0, p.duration|0, id);
-  }catch(e){}
+  }catch(e){
+    // мост недоступен — колбэк всё равно должен прийти, иначе busy
+    // пагинации зависнет навсегда (fail-open)
+    delete state.reqKind[id];
+    if (cb) cb(false, [], 'Мост недоступен', 0);
+  }
 }
 
 window.__vkbMusicData = function(r){
@@ -224,8 +229,8 @@ window.__vkbMusicData = function(r){
     if (el && r.kbps){ el.textContent = (r.kbps<=200?'~'+r.kbps:r.kbps)+'k'; }
     return;
   }
-  if (r.kind==='tracks' && cb){ delete state.reqKind[r.reqId]; cb(r.ok, r.items||[], r.error||''); return; }
-  if (r.kind==='playlists' && cb){ delete state.reqKind[r.reqId]; cb(r.ok, r.items||[], r.error||''); return; }
+  if (r.kind==='tracks' && cb){ delete state.reqKind[r.reqId]; cb(r.ok, r.items||[], r.error||'', r.raw|0); return; }
+  if (r.kind==='playlists' && cb){ delete state.reqKind[r.reqId]; cb(r.ok, r.items||[], r.error||'', r.raw|0); return; }
   if (r.kind==='player'){
     // пуш состояния службы (смена трека / syncPlayer): карточка снизу
     // оживает даже на пересобранной вкладке — очередь теперь в службе
@@ -252,19 +257,14 @@ window.__vkbMusicData = function(r){
     var d = r.dur||0;
     if (d > 0){
       $('tdur').textContent = fmt(d);
-      $('seek').value = Math.round(1000 * (r.pos||0) / d);
-      $('tcur').textContent = fmt(r.pos||0);
-    }
-    // подсветить строку текущего трека, если она в списке (класс
-    // restricted восстанавливаем — иначе серые треки «вернутся» в цвет)
-    if (r.rawId){
-      var rows = document.querySelectorAll('#list .trk');
-      for (var i=0;i<rows.length;i++){
-        var on = rows[i].getAttribute('data-raw') === r.rawId;
-        rows[i].className = 'trk' + (on ? ' cur' : '')
-          + (rows[i].getAttribute('data-restricted')==='1' ? ' restricted' : '');
+      // scrub: пока пользователь тянет ползунок — позицию службы не рисуем
+      if (!scrub){
+        $('seek').value = Math.min(1000, Math.max(0, Math.round(1000 * (r.pos||0) / d)));
+        $('tcur').textContent = fmt(r.pos||0);
       }
     }
+    // подсветить строку текущего трека, если она в списке
+    if (r.rawId) refreshCur();
     return;
   }
 };
@@ -290,27 +290,317 @@ function trackRowHtml(t, idx){
     + '</div></div>';
 }
 
-function renderTracks(items, append){
-  var cur = $('list');
-  if (!append){ state.tracks = items; }
-  else { for (var z=0; z<items.length; z++) state.tracks.push(items[z]); }
-  if (!state.tracks.length){
-    setMsg(items && items.length===0 && !append ? 'Список пуст' : 'Ничего нет');
+// 1.3.23 доработка-2: пагинация по паттерну PinoK (AudioLibraryPager):
+// у каждого списка свой serverOffset (сдвигается на размер СЫРОЙ страницы,
+// а не на число показанных треков — нормализация может отбрасывать записи),
+// флаг «есть ещё» (конец списка = пустая сырая страница) и флаг «запрос
+// в полёте» (защита от дублей при медленной сети — раньше таймер 1.5 с
+// снимал блокировку вслепую, и дважды уходил запрос с тем же offset).
+var pg = {
+  my:   { off: 0, more: true, busy: false, dups: 0 },
+  sr:   { off: 0, more: true, busy: false, dups: 0 },
+  pl:   { off: 0, more: true, busy: false, dups: 0 },
+  pltr: { off: 0, more: true, busy: false, dups: 0 }
+};
+
+// «Штамп» текущего вида: растёт при каждой смене раздела/открытии плейлиста/
+// новом поиске. Каждый запрос запоминает штамп (p.stamp) — ответ с чужим
+// штампом обновит только счётчики пагинации, DOM — нет (иначе поздний ответ
+// старого раздела перерисует текущий вид)
+state.view = 0;
+
+function resetPg(p){ p.off = 0; p.more = true; p.busy = false; p.dups = 0; }
+
+// Ошибка ПЕРВОЙ страницы: сообщение + кнопка «Повторить» (паттерн
+// PagingFooter из PinoK — раньше восстановление было только сменой вкладки)
+function showErrorRetry(err){
+  setMsg(esc(err || 'Не удалось загрузить'));
+  var btn = document.createElement('button');
+  btn.className = 'back';
+  btn.style.display = 'inline-block';
+  btn.style.marginTop = '10px';
+  btn.textContent = 'Повторить';
+  btn.addEventListener('click', function(ev){
+    ev.stopPropagation();
+    retryFresh();
+  });
+  $('list').appendChild(btn);
+}
+
+// Повтор первой страницы. Плейлист обрабатываем особо: loadSection закрыл
+// бы его (state.openedPl = null), а тут надо перезапросить ИМЕННО его треки;
+// для остальных разделов достаточно loadSection
+function retryFresh(){
+  if (state.openedPl){
+    var o = state.openedPl;
+    state.view++;
+    resetPg(pg.pltr);
+    pg.pltr.stamp = state.view;
+    setMsg('Загрузка плейлиста…');
+    pg.pltr.busy = true;
+    ask('pltracks', {owner:o.owner, id:o.id, key:o.key, offset:0},
+      function(ok, items, err, raw){ onTracks(pg.pltr, ok, items, err, raw, 'Плейлист пуст'); });
     return;
   }
-  var prevScroll = append ? cur.scrollTop : 0;
+  loadSection();
+}
+
+function removeFoot(){
+  var old = document.getElementById('moreFoot');
+  if (old && old.parentNode) old.parentNode.removeChild(old);
+}
+
+// Футер списка (паттерн PagingFooter из PinoK): «Загрузка…» / ошибка с
+// кнопкой «Повторить» / «Это все треки». Вместо стирания всего списка
+// надписью «Загрузка…» при каждой дозагрузке
+function setFoot(mode, err, endLabel){
+  removeFoot();
+  if (mode === 'none') return;
+  var div = document.createElement('div');
+  div.id = 'moreFoot';
+  if (mode === 'busy'){
+    div.innerHTML = '<div class="msg" style="padding:14px;">Загрузка…</div>';
+  } else if (mode === 'end'){
+    div.innerHTML = '<div class="msg" style="padding:14px;">' + esc(endLabel || 'Это все треки') + '</div>';
+  } else {
+    div.innerHTML = '<div class="msg" style="padding:14px;">' + esc(err || 'Ошибка загрузки')
+      + '<button class="back" id="moreRetry" style="display:inline-block;margin:8px 0 0;">Повторить</button></div>';
+  }
+  $('list').appendChild(div);
+  var btn = document.getElementById('moreRetry');
+  if (btn) btn.addEventListener('click', function(ev){
+    ev.stopPropagation();
+    loadMore();
+  });
+}
+
+// Дозагрузка следующей страницы ТЕКУЩЕГО списка. Все блокировки — здесь:
+// нет «ещё» или запрос уже летит — тихо выходим
+function loadMore(){
+  if (state.section === 'dl') return;
+  var p = pg.pltr;
+  if (state.openedPl){
+    if (!p.more || p.busy) return;
+    p.busy = true;
+    p.stamp = state.view;
+    setFoot('busy');
+    var o = state.openedPl;
+    ask('pltracks', {owner:o.owner, id:o.id, key:o.key, offset:p.off, append:1},
+      function(ok, items, err, raw){ onTracks(p, ok, items, err, raw, 'Плейлист пуст'); });
+    return;
+  }
+  if (state.section === 'my'){
+    p = pg.my;
+    if (!p.more || p.busy) return;
+    p.busy = true;
+    p.stamp = state.view;
+    setFoot('busy');
+    ask('tracks', {offset:p.off, append:1},
+      function(ok, items, err, raw){ onTracks(p, ok, items, err, raw, 'Список пуст'); });
+  } else if (state.section === 'sr'){
+    p = pg.sr;
+    if (!p.more || p.busy) return;
+    var q = $('q').value.trim();
+    if (!q) return;
+    p.busy = true;
+    p.stamp = state.view;
+    setFoot('busy');
+    ask('search', {q:q, offset:p.off, append:1},
+      function(ok, items, err, raw){ onTracks(p, ok, items, err, raw, 'Ничего не найдено'); });
+  } else if (state.section === 'pl'){
+    p = pg.pl;
+    if (!p.more || p.busy) return;
+    p.busy = true;
+    p.stamp = state.view;
+    setFoot('busy');
+    ask('playlists', {offset:p.off, append:1},
+      function(ok, items, err, raw){ onPlaylists(p, ok, items, err, raw); });
+  }
+}
+
+// Приём страницы треков. p — конкретный блок пагинации (захвачен на момент
+// запроса: ответ устаревшего раздела не спутается с текущим). emptyMsg —
+// текст для пустого списка этого раздела
+function onTracks(p, ok, items, err, raw, emptyMsg){
+  // устаревший ответ (раздел уже покинут, набран новый запрос): DOM не
+  // трогаем и busy живого запроса не трогаем — иначе скролл успеет отправить
+  // дубль до прихода актуального ответа
+  if (p.stamp !== state.view) return;
+  p.busy = false;
+  if (!ok){
+    if (p.off === 0) showErrorRetry(err || 'Не удалось загрузить');
+    else setFoot('err', err || 'Не удалось загрузить ещё страницу');
+    return;
+  }
+  var wasFresh = (p.off === 0);
+  if (raw <= 0){
+    // пустая СЫРАЯ страница — честный конец списка (паттерн PinoK:
+    // hasMore считается по сырой странице, а не по total — VK врёт в count)
+    p.more = false;
+    if (state.tracks.length) setFoot('end');
+    else setMsg(emptyMsg || 'Список пуст');
+    return;
+  }
+  p.off += raw;
+  // дедуп по rawId (в PinoK — ключ ownerId_id): VK иногда отдаёт
+  // перекрывающиеся окна, а дубли в списке = «пагинация сломана»
+  var seen = {};
+  var i, t;
+  for (i=0;i<state.tracks.length;i++){
+    t = state.tracks[i];
+    if (t && t.rawId) seen[t.rawId] = 1;
+  }
+  var fresh = [];
+  for (i=0;i<items.length;i++){
+    t = items[i];
+    if (!t || !t.rawId || seen[t.rawId]) continue;
+    seen[t.rawId] = 1;
+    fresh.push(t);
+  }
+  if (!fresh.length){
+    // страница целиком из дубликатов: после N таких подряд признаём конец
+    // списка (паттерн PinoK — защита от листания одного окна по кругу)
+    p.dups++;
+    if (p.dups >= 3) p.more = false;
+  } else {
+    p.dups = 0;
+  }
+  var from = state.tracks.length;
+  for (i=0;i<fresh.length;i++) state.tracks.push(fresh[i]);
+  if (wasFresh){
+    if (!state.tracks.length){ setMsg(emptyMsg || 'Список пуст'); return; }
+    renderTracksFresh();
+  } else if (fresh.length){
+    renderTracksAppend(from);
+  }
+  if (!p.more) setFoot('end');
+  else removeFoot();
+}
+
+// Приём страницы плейлистов (та же механика, отдельный блок pg.pl)
+function onPlaylists(p, ok, items, err, raw){
+  // устаревший ответ — DOM и busy не трогаем (см. onTracks)
+  if (p.stamp !== state.view) return;
+  p.busy = false;
+  if (!ok){
+    if (p.off === 0) showErrorRetry(err || 'Не удалось загрузить');
+    else setFoot('err', err || 'Не удалось загрузить ещё страницу', 'Это все плейлисты');
+    return;
+  }
+  var wasFresh = (p.off === 0);
+  if (raw <= 0){
+    p.more = false;
+    if (state.playlists.length) setFoot('end', '', 'Это все плейлисты');
+    else setMsg('Плейлистов нет');
+    return;
+  }
+  p.off += raw;
+  var seen = {};
+  var i, pl;
+  for (i=0;i<state.playlists.length;i++){
+    pl = state.playlists[i];
+    if (pl && pl.id) seen[pl.owner_id + '_' + pl.id] = 1;
+  }
+  var fresh = [];
+  for (i=0;i<items.length;i++){
+    pl = items[i];
+    if (!pl || !pl.id || seen[pl.owner_id + '_' + pl.id]) continue;
+    seen[pl.owner_id + '_' + pl.id] = 1;
+    fresh.push(pl);
+  }
+  if (!fresh.length){
+    p.dups++;
+    if (p.dups >= 3) p.more = false;
+  } else {
+    p.dups = 0;
+  }
+  var from = state.playlists.length;
+  for (i=0;i<fresh.length;i++) state.playlists.push(fresh[i]);
+  renderPlaylists(from);
+  if (!p.more) setFoot('end', '', 'Это все плейлисты');
+  else removeFoot();
+}
+
+// Свежая загрузка раздела: сброс пагинации раздела и запрос первой страницы
+function loadSection(){
+  if (state.section === 'dl'){ lastDlSnap = ''; renderDownloads(); return; } // снимок мгновенный
+  // закрытый плейлист при любом входе в раздел — иначе поиск из открытого
+  // плейлиста будет дозагружать ТРЕКИ ПЛЕЙЛИСТА в поисковую выдачу
+  // (loadMore первым проверяет openedPl; блокер с ревью №2)
+  state.openedPl = null;
+  $('back').style.display = 'none';
+  state.view++;
+  var p = pg.my;
+  if (state.section === 'sr') p = pg.sr;
+  else if (state.section === 'pl') p = pg.pl;
+  resetPg(p);
+  // Списки раздела сбрасываем ВСЕГДА: иначе старые плейлисты попадут в
+  // дедуп первого запроса (fresh = пусто) и после «назад» из плейлиста
+  // экран навсегда залипнет на «Загрузка…» (регрессия найдена ревью)
+  state.tracks = [];
+  state.playlists = [];
+  p.stamp = state.view;
+  setMsg('Загрузка…');
+  p.busy = true;
+  if (state.section === 'my'){
+    ask('tracks', {offset:0, append:0},
+      function(ok, items, err, raw){ onTracks(p, ok, items, err, raw, 'Список пуст'); });
+  } else if (state.section === 'sr'){
+    var q = $('q').value.trim();
+    if (!q){ p.busy = false; setMsg('Введите запрос'); return; }
+    ask('search', {q:q, offset:0, append:0},
+      function(ok, items, err, raw){ onTracks(p, ok, items, err, raw, 'Ничего не найдено'); });
+  } else {
+    ask('playlists', {offset:0, append:0},
+      function(ok, items, err, raw){ onPlaylists(p, ok, items, err, raw); });
+  }
+}
+
+// Подсветка играющего трека после (пере)рисования строк — класс .cur
+// иначе терялся до следующего пуша службы (находка ревью)
+function refreshCur(){
+  if (!state.natRawId) return;
+  var rows = document.querySelectorAll('#list .trk');
+  for (var i=0; i<rows.length; i++){
+    var on = rows[i].getAttribute('data-raw') === state.natRawId;
+    rows[i].className = 'trk' + (on ? ' cur' : '')
+      + (rows[i].getAttribute('data-restricted')==='1' ? ' restricted' : '');
+  }
+}
+
+// Полная перерисовка первой страницы списка треков
+function renderTracksFresh(){
   var html = '';
   for (var i=0; i<state.tracks.length; i++){
     var t = state.tracks[i];
     if (!t) continue;
     html += trackRowHtml(t, i);
   }
-  cur.innerHTML = html;
-  if (append){ cur.scrollTop = prevScroll; }
-  wireRows();
-  // битрейт — лениво, как в расширении (кэш в Kotlin делает повторные
-  // пробы дешёвыми)
-  for (var j=0; j<state.tracks.length; j++){
+  if (!state.tracks.length){ setMsg('Список пуст'); return; }
+  $('list').innerHTML = html;
+  refreshCur();
+  probeRange(0);
+}
+
+// Дозагрузка: новые строки ПРИБАВЛЯЮТСЯ в конец DOM (как в полной версии
+// VK) — без перерисовки всего списка, без прыжков скролла и мигания
+function renderTracksAppend(from){
+  var html = '';
+  for (var i=from; i<state.tracks.length; i++){
+    var t = state.tracks[i];
+    if (!t) continue;
+    html += trackRowHtml(t, i);
+  }
+  removeFoot();
+  $('list').insertAdjacentHTML('beforeend', html);
+  refreshCur();
+  probeRange(from);
+}
+
+// Проба битрейта (лениво, как в расширении; кэш в Kotlin делает повторные
+// пробы дешёвыми) — только для диапазона [from..конец)
+function probeRange(from){
+  for (var j=from; j<state.tracks.length; j++){
     var tr = state.tracks[j];
     if (tr && tr.url && !state.probing[tr.rawId] && !tr.restricted){
       state.probing[tr.rawId] = 1;
@@ -319,88 +609,47 @@ function renderTracks(items, append){
   }
 }
 
-function wireRows(){
-  var rows = document.querySelectorAll('#list .trk');
-  for (var i=0; i<rows.length; i++){
-    (function(row){
-      row.addEventListener('click', function(ev){
-        var dl = ev.target.closest ? ev.target.closest('[data-dl]') : null;
-        var idx = parseInt(row.getAttribute('data-i'), 10);
-        if (dl){
-          ev.stopPropagation();
-          var t = state.tracks[idx];
-          try{
-            window.VkbMusic.download(JSON.stringify({
-              url:(t && t.url) ? t.url : '', hls:(t && t.hls) ? t.hls : 0,
-              name:(t && t.url) ? ((t.artist?t.artist+' - ':'')+t.title) : '',
-              rawId:(t && t.rawId) ? t.rawId : ''
-            }));
-          }catch(e){}
-          return;
-        }
-        playFromList(idx);
-      });
-    })(rows[i]);
-  }
+function plRowHtml(p, i){
+  var cover = '';
+  if (p.photo && p.photo.photo_300) cover = p.photo.photo_300;
+  else if (p.thumbs && p.thumbs.length && p.thumbs[p.thumbs.length-1] && p.thumbs[p.thumbs.length-1].photo_300) cover = p.thumbs[p.thumbs.length-1].photo_300;
+  var cov = cover ? ' style="background-image:url(\'' + cover + '\')"' : '';
+  return '<div class="pl" data-p="'+i+'">'
+    + '<div class="plcov"'+cov+'></div>'
+    + '<div class="meta"><div class="tt">'+esc(p.title||'Плейлист')+'</div>'
+    + '<div class="ar">'+(p.count?p.count+' треков':'')+'</div></div></div>';
 }
 
-function renderPlaylists(items, append){
-  if (!append) state.playlists = items;
-  else { for (var z=0; z<items.length; z++) state.playlists.push(items[z]); }
-  if (!state.playlists.length){ setMsg('Плейлистов нет'); return; }
+// Рендер плейлистов: from===0 — полная перерисовка, иначе добавление строк
+// в конец (та же механика, что у треков). Клик — делегирование на #list
+function renderPlaylists(from){
   var html = '';
-  for (var i=0; i<state.playlists.length; i++){
+  for (var i=from; i<state.playlists.length; i++){
     var p = state.playlists[i];
     if (!p) continue;
-    var cover = '';
-    if (p.photo && p.photo.photo_300) cover = p.photo.photo_300;
-    else if (p.thumbs && p.thumbs.length && p.thumbs[p.thumbs.length-1] && p.thumbs[p.thumbs.length-1].photo_300) cover = p.thumbs[p.thumbs.length-1].photo_300;
-    var cov = cover ? ' style="background-image:url(\'' + cover + '\')"' : '';
-    html += '<div class="pl" data-p="'+i+'">'
-      + '<div class="plcov"'+cov+'></div>'
-      + '<div class="meta"><div class="tt">'+esc(p.title||'Плейлист')+'</div>'
-      + '<div class="ar">'+(p.count?p.count+' треков':'')+'</div></div></div>';
+    html += plRowHtml(p, i);
   }
-  $('list').innerHTML = html;
-  var pls = document.querySelectorAll('#list .pl');
-  for (var k=0; k<pls.length; k++){
-    (function(el){
-      el.addEventListener('click', function(){
-        var p = state.playlists[parseInt(el.getAttribute('data-p'), 10)];
-        if (!p) return;
-        state.openedPl = {owner:p.owner_id, id:p.id, key:p.access_key||'', title:p.title};
-        $('back').style.display = 'inline-block';
-        setMsg('Загрузка плейлиста…');
-        ask('pltracks', {owner:p.owner_id, id:p.id, key:p.access_key||''}, onTracks);
-      });
-    })(pls[k]);
-  }
-}
-
-function onTracks(ok, items, err){
-  if (!ok){ setMsg(err || 'Не удалось загрузить'); return; }
-  renderTracks(items, false);
-}
-
-function loadSection(append){
-  if (state.section==='dl'){ lastDlSnap = ''; renderDownloads(); return; } // снимок мгновенный
-  setMsg('Загрузка…');
-  if (state.section==='my'){
-    ask('tracks', {offset: state.tracks.length && append ? state.tracks.length : 0, append:append}, onTracks);
-  } else if (state.section==='sr'){
-    doSearch(append);
+  if (from === 0){
+    if (!state.playlists.length){ setMsg('Плейлистов нет'); return; }
+    $('list').innerHTML = html;
   } else {
-    ask('playlists', {offset: state.playlists.length && append ? state.playlists.length : 0, append:append}, function(ok, items, err){
-      if (!ok){ setMsg(err || 'Не удалось загрузить'); return; }
-      renderPlaylists(items, append);
-    });
+    removeFoot();
+    $('list').insertAdjacentHTML('beforeend', html);
   }
 }
 
-function doSearch(append){
-  var q = $('q').value.trim();
-  if (!q){ setMsg('Введите запрос'); return; }
-  ask('search', {q:q, offset: append ? state.tracks.length : 0, append:append}, onTracks);
+// Открытие плейлиста: свежий сброс пагинации pltr и первая страница
+function openPlaylist(p){
+  state.openedPl = {owner:p.owner_id, id:p.id, key:p.access_key||'', title:p.title};
+  $('back').style.display = 'inline-block';
+  state.tracks = [];
+  state.view++;
+  resetPg(pg.pltr);
+  pg.pltr.stamp = state.view;
+  setMsg('Загрузка плейлиста…');
+  pg.pltr.busy = true;
+  ask('pltracks', {owner:p.owner_id, id:p.id, key:p.access_key||'', offset:0},
+    function(ok, items, err, raw){ onTracks(pg.pltr, ok, items, err, raw, 'Плейлист пуст'); });
 }
 
 // ------------------------------------------------------------------
@@ -494,8 +743,11 @@ window.__vkbPlayerCmd = function(cmd){
   }catch(e){}
 };
 
-// хуки службы: позиция каждую секунду (с rawId — какой трек играет).
-// «Конец трека» сюда больше не приходит: очередь ведёт сама служба.
+// хуки службы: позицию присылает тикер каждую секунду (с rawId — какой трек
+// играет). Единицы — СЕКУНДЫ (в службе lastPos/lastDur хранятся в секундах;
+// раньше сюда утекали миллисекунды MediaPlayer — отсюда «белиберда» в
+// таймере и ползунок в упоре после возврата из фона). «Конец трека» сюда
+// больше не приходит: очередь ведёт сама служба.
 window.__vkbMusicPos = function(pos, dur, playing, has, rawId){
   if (rawId) state.natRawId = rawId;
   state.natHas = !!has;
@@ -503,13 +755,18 @@ window.__vkbMusicPos = function(pos, dur, playing, has, rawId){
   state.natPos = pos||0;
   state.natDur = dur||0;
   $('bPlay').textContent = playing ? '⏸' : '▶';
+  // сторож зависшего скраба: если drag оборвался без change/touchcancel,
+  // через 10 с разрешаем позицию рисоваться снова
+  if (scrub){
+    if (Date.now() - scrubAt > 10000){ scrub = false; } else { return; }
+  }
   var d = dur||0;
   if (!d){
     var t = curTrack();
     if (t) d = t.duration||0;
   }
   if (d > 0){
-    $('seek').value = Math.round(1000 * (pos||0) / d);
+    $('seek').value = Math.min(1000, Math.max(0, Math.round(1000 * (pos||0) / d)));
     $('tcur').textContent = fmt(pos||0);
   }
 };
@@ -517,17 +774,43 @@ window.__vkbMusicPos = function(pos, dur, playing, has, rawId){
 // ------------------------------------------------------------------
 // Управление плеером (кнопки и ползунок)
 // ------------------------------------------------------------------
-$('seek').addEventListener('input', function(){
+// 1.3.23 доработка-2: скраб как в полной версии VK (паттерн PinoK —
+// deferred seek): пока тянешь — двигается только ползунок и время-превью,
+// по отпусканию перемотка уходит в службу ОДИН раз. Раньше nativeSeek
+// дёргался на каждый тик input — MediaPlayer захлёбывался seekTo, а
+// ежесекундный пуш позиции одновременно откатывал ползунок назад
+var scrub = false;
+var scrubAt = 0; // когда последний раз двигали ползунок — сторож зависшего drag
+
+function effDur(){
   // длительность берём из службы (трек может быть из прошлой сессии вкладки)
   var d = state.natDur;
   if (!d){
     var t = curTrack();
     if (t) d = t.duration||0;
   }
-  if (d && d > 0){
-    try{ window.VkbMusic.nativeSeek(d * (parseInt($('seek').value,10)/1000)); }catch(e){}
+  return d;
+}
+
+$('seek').addEventListener('input', function(){
+  scrub = true;
+  scrubAt = Date.now();
+  var d = effDur();
+  if (d > 0){
+    // превью времени под пальцем — как в VK
+    $('tcur').textContent = fmt(d * (parseInt($('seek').value,10)/1000));
   }
 });
+$('seek').addEventListener('change', function(){
+  var d = effDur();
+  if (d > 0){
+    try{ window.VkbMusic.nativeSeek(d * (parseInt($('seek').value,10)/1000)); }catch(e){}
+  }
+  scrub = false;
+});
+// системный жест/входящий вызов может оборвать drag БЕЗ change — иначе
+// scrub зависнет true и позиция навсегда перестанет рисоваться (находка ревью)
+$('seek').addEventListener('touchcancel', function(){ scrub = false; });
 
 $('bPlay').addEventListener('click', togglePlay);
 $('bNext').addEventListener('click', function(){
@@ -572,7 +855,7 @@ for (var i=0; i<tabs.length; i++){
     state.openedPl = null;
     state.tracks = [];
     state.playlists = [];
-    loadSection(false);
+    loadSection();
   });
 }
 
@@ -584,10 +867,11 @@ $('back').addEventListener('click', function(){
   for (var k=0; k<tabs2.length; k++){
     tabs2[k].className = tabs2[k].getAttribute('data-s')==='pl' ? 'tab on' : 'tab';
   }
-  loadSection(false);
+  loadSection();
 });
 
-// поиск — дебаунс 400 мс
+// поиск — дебаунс 400 мс; загрузку делает loadSection (сброс пагинации
+// раздела внутри)
 $('q').addEventListener('input', function(){
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(function(){
@@ -599,7 +883,7 @@ $('q').addEventListener('input', function(){
         if (tabs[k2].getAttribute('data-s')==='sr'){ tabs[k2].className = 'tab on'; }
       }
       state.tracks = [];
-      doSearch(false);
+      loadSection();
     }
   }, 400);
 });
@@ -635,16 +919,8 @@ function renderDownloads(){
       + '<div class="ar">' + sub + '</div>' + bar + '</div>' + cancel + '</div>';
   }
   $('list').innerHTML = html;
-  var btns = document.querySelectorAll('#list [data-dlc]');
-  for (var k=0; k<btns.length; k++){
-    (function(el){
-      el.addEventListener('click', function(ev){
-        ev.stopPropagation();
-        try{ window.VkbMusic.cancelDownload(parseInt(el.getAttribute('data-dlc'), 10)); }catch(e){}
-        renderDownloads();
-      });
-    })(btns[k]);
-  }
+  // отмена задачи — через делегированный клик на #list (слушатель навешан
+  // один раз, перерисовки ему не страшны)
 }
 
 // опрос только когда вкладка «Загрузки» открыта — лишней работы нет
@@ -652,26 +928,62 @@ setInterval(function(){
   if (state.section === 'dl') renderDownloads();
 }, 800);
 
-// старт: моя музыка
-setMsg('Загрузка…');
-ask('tracks', {offset:0}, onTracks);
+// старт: моя музыка (loadSection сам сбрасывает пагинацию и вешает футер)
+loadSection();
 
 // служба могла пережить эту вкладку (закрыли/убили WebView, трек играет):
 // забираем её состояние — карточка снизу оживает
 try{ if (window.VkbMusic && window.VkbMusic.syncPlayer) window.VkbMusic.syncPlayer(); }catch(e){}
 
-// бесконечный скролл: у дна докачиваем следующую пачку (моя музыка/поиск)
-state.loadingMore = false;
+// бесконечный скролл: у дна дозагружаем следующую страницу текущего списка
+// (моя музыка / поиск / плейлисты / треки плейлиста — как в полной версии
+// VK). Всю защиту от повторных запросов и дублей делает loadMore (busy/more)
 $('list').addEventListener('scroll', function(){
   var el = $('list');
-  if (state.loadingMore) return;
   if (el.scrollTop + el.clientHeight < el.scrollHeight - 400) return;
-  if (state.section==='my' || state.section==='sr'){
-    if (state.section==='sr' && !$('q').value.trim()) return;
-    state.loadingMore = true;
-    loadSection(true);
-    setTimeout(function(){ state.loadingMore = false; }, 1500);
+  if (state.section === 'my' || state.section === 'sr' || state.section === 'pl' || state.openedPl){
+    loadMore();
   }
+});
+
+// Делегированные клики списка: один слушатель на контейнер — переживает
+// любые перерисовки строк (раньше слушатели вешались на строки и
+// пересоздавались после каждой дозагрузки)
+$('list').addEventListener('click', function(ev){
+  var tg = ev.target;
+  // отмена задачи загрузки (вкладка «Загрузки»)
+  var canc = tg.closest ? tg.closest('[data-dlc]') : null;
+  if (canc){
+    ev.stopPropagation();
+    try{ window.VkbMusic.cancelDownload(parseInt(canc.getAttribute('data-dlc'), 10)); }catch(e){}
+    renderDownloads();
+    return;
+  }
+  // строка плейлиста
+  var pl = tg.closest ? tg.closest('.pl') : null;
+  if (pl){
+    var pp = state.playlists[parseInt(pl.getAttribute('data-p'), 10)];
+    if (pp) openPlaylist(pp);
+    return;
+  }
+  // строка трека: кнопка ⤓ или воспроизведение
+  var row = tg.closest ? tg.closest('.trk') : null;
+  if (!row) return;
+  var idx = parseInt(row.getAttribute('data-i'), 10);
+  var dl = tg.closest ? tg.closest('[data-dl]') : null;
+  if (dl){
+    ev.stopPropagation();
+    var t = state.tracks[idx];
+    try{
+      window.VkbMusic.download(JSON.stringify({
+        url:(t && t.url) ? t.url : '', hls:(t && t.hls) ? t.hls : 0,
+        name:(t && t.url) ? ((t.artist?t.artist+' - ':'')+t.title) : '',
+        rawId:(t && t.rawId) ? t.rawId : ''
+      }));
+    }catch(e){}
+    return;
+  }
+  playFromList(idx);
 });
 
 // репорт состояния шторке больше не нужен: источник истины — служба

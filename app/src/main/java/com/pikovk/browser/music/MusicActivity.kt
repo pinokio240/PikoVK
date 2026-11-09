@@ -100,6 +100,21 @@ class MusicActivity : AppCompatActivity() {
         // wake-lock здесь НЕ трогаем (в отличие от MainActivity): вкладка
         // «Музыка» всегда лежит ПОВЕРХ MainActivity — её onStop/onStart
         // корректно держат и отпускают блокировку за нас
+        // 1.3.23 доработка-2: возврат из фона — сразу пересинхронизируем
+        // вкладку со службой (паттерн notifyResumed из PinoK): пока WebView
+        // был заморожен, тикер службы мог уйти вперёд — мгновенный снапшот
+        // вернёт таймер и ползунок на место, не дожидаясь следующей секунды
+        val wv = web
+        if (wv != null) {
+            wv.post {
+                runCatching {
+                    wv.evaluateJavascript(
+                        "try{ if (window.VkbMusic && window.VkbMusic.syncPlayer) window.VkbMusic.syncPlayer(); }catch(e){}",
+                        null
+                    )
+                }
+            }
+        }
     }
 
     override fun onStop() {

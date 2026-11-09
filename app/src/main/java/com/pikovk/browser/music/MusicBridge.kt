@@ -61,31 +61,32 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         }
     }
 
-    private fun send(kind: String, reqId: Int, ok: Boolean, data: String, error: String) {
-        val obj = JSONObject()
-        obj.put("kind", kind)
-        obj.put("reqId", reqId)
-        obj.put("ok", ok)
-        if (ok) {
-            obj.put("data", JSONObject(data))
-        } else {
-            obj.put("error", error)
-        }
-        respond(webHolder(), obj.toString())
-    }
-
-    private fun sendList(kind: String, reqId: Int, ok: Boolean, items: String, append: Boolean, error: String) {
+    private fun sendList(kind: String, reqId: Int, ok: Boolean, items: String, append: Boolean, rawPage: Int, error: String) {
         val obj = JSONObject()
         obj.put("kind", kind)
         obj.put("reqId", reqId)
         obj.put("ok", ok)
         obj.put("append", append)
+        // 1.3.23 доработка-2: размер СЫРОЙ страницы (до нормализации) —
+        // паттерн AudioLibraryPager из PinoK: offset сдвигаем на сырой размер,
+        // конец списка = пустая сырая страница. Нормализация может отбросить
+        // треки (id==0) — если сдвигать по числу показанных, offset дрейфует
+        // и VK отдаёт те же треки по кругу (дрейфующая пагинация)
+        obj.put("raw", rawPage)
         if (ok) {
             obj.put("items", JSONArray(items))
         } else {
             obj.put("error", error)
         }
         respond(webHolder(), obj.toString())
+    }
+
+    // Размер сырой страницы ответа (0 — ответа/списка нет)
+    private fun rawCount(resp: JSONObject?): Int {
+        if (resp == null) return 0
+        val items = resp.optJSONArray("items")
+        if (items == null) return 0
+        return items.length()
     }
 
     private fun normalizeResp(resp: JSONObject?): String {
@@ -100,7 +101,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         Thread {
             val resp = MusicApi.myMusic(offset)
             val ok = resp != null
-            sendList("tracks", reqId, ok, normalizeResp(resp), append != 0,
+            sendList("tracks", reqId, ok, normalizeResp(resp), append != 0, rawCount(resp),
                 if (ok) "" else "Не удалось загрузить (нет сессии VK или сеть недоступна)")
         }.start()
     }
@@ -110,7 +111,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         Thread {
             val resp = MusicApi.search(query, offset)
             val ok = resp != null
-            sendList("tracks", reqId, ok, normalizeResp(resp), append != 0,
+            sendList("tracks", reqId, ok, normalizeResp(resp), append != 0, rawCount(resp),
                 if (ok) "" else "Поиск не удался")
         }.start()
     }
@@ -124,7 +125,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
                 val arr = resp.optJSONArray("items")
                 if (arr != null) list = arr.toString()
             }
-            sendList("playlists", reqId, resp != null, list, append != 0,
+            sendList("playlists", reqId, resp != null, list, append != 0, rawCount(resp),
                 if (resp != null) "" else "Не удалось загрузить плейлисты")
         }.start()
     }
@@ -134,18 +135,23 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         Thread {
             var ok = false
             var list = "[]"
+            var raw = 0
             var err = "Неверные данные плейлиста"
             try {
                 val p = JSONObject(payload)
                 val owner = p.optLong("owner", 0)
                 val id = p.optLong("id", 0)
                 val key: String? = p.optString("key", "")
+                // 1.3.23 доработка-2: offset плейлиста — дозагрузка по скроллу
+                // (как в полной версии VK), раньше всегда качалась одна страница
+                val offset = p.optInt("offset", 0)
                 if (owner != 0L && id != 0L) {
                     val safeKey: String = if (key == null) "" else key
-                    val resp = MusicApi.playlistTracks(owner, id, safeKey, 0)
+                    val resp = MusicApi.playlistTracks(owner, id, safeKey, offset)
                     if (resp != null) {
                         ok = true
                         err = ""
+                        raw = rawCount(resp)
                         list = normalizeResp(resp)
                     } else {
                         err = "Не удалось загрузить треки плейлиста"
@@ -153,7 +159,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
                 }
             } catch (_: Exception) {
             }
-            sendList("tracks", reqId, ok, list, append != 0, err)
+            sendList("tracks", reqId, ok, list, append != 0, raw, err)
         }.start()
     }
 
