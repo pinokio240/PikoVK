@@ -543,6 +543,12 @@ class MainActivity : AppCompatActivity() {
         // «фантомный» менеджер убивает рендерер WebView — звук обрывался.
         // Держим процесс foreground-службой mediaPlayback. Если уже работает
         // опрос уведомлений, его foreground достаточно — не дублируем.
+        // 1.3.22: служба теперь обычно УЖЕ живёт — она запускается упреждающе
+        // в момент старта трека (VkbBridge.playerState, приложение ещё на
+        // экране; требование Android 17 «Background audio hardening»: FGS
+        // mediaPlayback стартовать видимым). Здесь — только добор, если трек
+        // пошёл без репорта или упреждение выключено. Повторный
+        // startForegroundService для живой службы безвреден (onStartCommand).
         if (Prefs.backgroundPlayback && !NotifyService.isRunning) {
             PlaybackService.start(this)
         }

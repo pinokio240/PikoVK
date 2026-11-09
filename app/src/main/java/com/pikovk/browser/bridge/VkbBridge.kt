@@ -11,6 +11,7 @@ import android.webkit.JavascriptInterface
 import android.widget.Toast
 import com.pikovk.browser.browser.AudioGrabber
 import com.pikovk.browser.media.PlaybackService
+import com.pikovk.browser.util.Prefs
 
 // JS-мост расширений: window.VkbBridge.
 //
@@ -48,6 +49,20 @@ class VkbBridge(private val context: Context) {
     @JavascriptInterface
     fun playerState(title: String, artist: String, playing: String) {
         PlaybackService.updateMeta(title, artist, playing == "1")
+        // 1.3.22: упреждающий запуск службы, ПОКА приложение на экране.
+        // Официальная рекомендация Android 17 («Background audio hardening»,
+        // developer.android.com/about/versions/17/changes/bg-audio): FGS типа
+        // mediaPlayback нужно запускать, пока приложение видимо, — служба,
+        // стартованная уже при погашенном экране (старое поведение: запуск
+        // только в onStop), теряет статус while-in-use, и блокировка экрана
+        // молча глушит звук. Репорт playing прилетает сразу после тапа
+        // пользователя — это и есть момент «приложение видимо».
+        if (playing == "1" && Prefs.backgroundPlayback) {
+            val alive = PlaybackService.isRunning()
+            if (!alive) {
+                PlaybackService.start(context)
+            }
+        }
     }
 
     // Общая точка входа для скачиваний: используется и мостом, и

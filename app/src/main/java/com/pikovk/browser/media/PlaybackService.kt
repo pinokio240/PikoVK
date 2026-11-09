@@ -218,6 +218,13 @@ class PlaybackService : Service() {
         @Volatile private var lastArtist: String = ""
         @Volatile private var lastPlaying: Boolean = false
 
+        // 1.3.22: для упреждающего запуска из VkbBridge.playerState —
+        // без повторного startForegroundService, если служба уже живёт.
+        fun isRunning(): Boolean {
+            val i = instance
+            return i != null
+        }
+
         fun attach(wv: WebView?) {
             linkedWeb = wv
         }

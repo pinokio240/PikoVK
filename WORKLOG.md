@@ -3,6 +3,13 @@
 Лёгкий Android WebView-браузер для VK (Kotlin, `com.pikovk.browser`).
 Формат: свежие записи сверху. Детали реализации — в README.md.
 
+## 1.3.22 (versionCode 27) — фикс: звук при заблокированном экране
+
+- Симптом владельца: «при блокировке экрана аудио не воспроизводится» (при свёрнутом приложении с включённым экраном звук был, при блокировке — нет).
+- **Упреждающий запуск FGS, пока приложение видимо.** Официальная рекомендация Android 17 «Background audio hardening» (developer.android.com/about/versions/17/changes/bg-audio): FGS типа `mediaPlayback` надо стартовать, пока приложение на экране, — служба, запущенная уже при погасшем экране (старое поведение: только `onStop`), теряет статус while-in-use, и система молча глушит звук. Теперь `VkbBridge.playerState` (репорт playing приходит сразу после тапа пользователя) запускает `PlaybackService` немедленно; `onStop` остаётся добором. Новое `PlaybackService.isRunning()` — без повторного startForegroundService.
+- **Подмена видимости страницы на уровне JS** (секция `VISIBILITY_JS`, тот же тумблер «Фоновое воспроизведение», что и `PLAYER_JS`): дополнение к `PlaybackWebView` (1.3.18 подменял видимость только на уровне View/окна). `document.hidden`/`webkitHidden`/`visibilityState`/`webkitVisibilityState` переопределяются на «видима», `visibilitychange` глушится в фазе захвата на window и document (наши слушатели — document-start, раньше скриптов VK). Плеер страницы не получает сигнала «страница скрыта» ни по одному пути.
+- Контроль: `scripts/check_piko_1322.py`. Фикс компиляции из 80ea881 (проверка `intent == null` в `PlaybackService.onStartCommand`) включён в эту версию.
+
 ## 1.3.21 (versionCode 26) — музыка: скачивание треков + медиашторка
 
 - **Кнопки скачивания у треков** (по образцу VK Music Saver от VK Next): новая JS-секция `AUDIO_DL_JS` в `ExtensionEngine` — у каждой строки Музыки vk.ru/vk.com кнопка «↓»; клик передаёт «Исполнитель - Название» в `VkbBridge.downloadAudioTrack`, включает трек; `AudioGrabber` (новый, `browser/`) ловит в `shouldInterceptRequest` адрес аудио-CDN (vkuseraudio.net, .vk-cdn.net) и качает файл в «Загрузки» под этим именем. Тумблер «Кнопки скачивания у треков (Музыка VK)», по умолчанию включён. Ограничение честно: если трек уже загружен в плеер (пауза) — ссылки нет, нужен повторный клик.

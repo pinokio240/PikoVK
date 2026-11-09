@@ -67,6 +67,7 @@ object ExtensionEngine {
         // 1.3.21: кнопки скачивания у треков VK Музыки (по образцу
         // VK Music Saver) и репортёр плеера для медиашторки.
         if (Prefs.extAudioDl) sb.append(AUDIO_DL_JS)
+        if (Prefs.backgroundPlayback) sb.append(VISIBILITY_JS)
         if (Prefs.backgroundPlayback) sb.append(PLAYER_JS)
         if (Prefs.extAdBlock) sb.append(AD_BLOCK_JS)
         sb.append("})();")
@@ -512,6 +513,39 @@ object ExtensionEngine {
             if(document.body){vkbAdStart();}
             else{document.addEventListener('DOMContentLoaded',vkbAdStart,{once:true});}
           }
+        }catch(e){}
+    """.trimIndent()
+
+    // ------------------------------------------------------------------
+    // 1.3.22. Подмена видимости страницы НА УРОВНЕ JS. Дополнение к
+    // PlaybackWebView (1.3.18): тот перехватывает смену видимости ОКНА
+    // на уровне View, но при блокировке экрана сигнал «страница скрыта»
+    // может дойти до Chromium и другим путём — тогда VK-скрипты видят
+    // document.hidden=true и visibilitychange, и плеер страницы
+    // останавливается. Здесь мы: (1) переопределяем document.hidden,
+    // document.webkitHidden, document.visibilityState и
+    // document.webkitVisibilityState — страница ВСЕГДА видит «видима»;
+    // (2) перехватываем visibilitychange в фазе захвата на window и на
+    // document — наши слушатели добавляются при document-start, раньше
+    // скриптов VK, поэтому stopImmediatePropagation глушит событие до
+    // того, как его увидят обработчики страницы. Включается тем же
+    // тумблером «Фоновое воспроизведение» (вместе с PLAYER_JS): выкл.
+    // тумблер возвращает честную видимость. Без '$' и шаблонных строк.
+    // ------------------------------------------------------------------
+    private val VISIBILITY_JS = """
+        try{
+          var vkbVis=function(){
+            try{
+              Object.defineProperty(document,'hidden',{get:function(){return false;},configurable:true});
+              Object.defineProperty(document,'webkitHidden',{get:function(){return false;},configurable:true});
+              Object.defineProperty(document,'visibilityState',{get:function(){return 'visible';},configurable:true});
+              Object.defineProperty(document,'webkitVisibilityState',{get:function(){return 'visible';},configurable:true});
+            }catch(e){}
+          };
+          vkbVis();
+          var vkbVisStop=function(e){try{e.stopImmediatePropagation();}catch(e2){}};
+          window.addEventListener('visibilitychange',vkbVisStop,true);
+          document.addEventListener('visibilitychange',vkbVisStop,true);
         }catch(e){}
     """.trimIndent()
 
