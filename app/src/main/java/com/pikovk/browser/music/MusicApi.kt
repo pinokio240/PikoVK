@@ -416,7 +416,9 @@ object MusicApi {
         val cached: Int? = bitrateCache[rawId]
         if (cached != null) return cached
         if (durationSec <= 0) return null
-        var kbps = 0
+        // без инициализатора: обе ветки if/else ниже присваивают kbps до
+        // чтения — `= 0` компилятор звал избыточным (w: initializer is redundant)
+        var kbps: Int
         if (!hls) {
             val len: Long? = SimpleHttp.contentLength(url)
             if (len == null) return null
