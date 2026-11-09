@@ -91,6 +91,9 @@ class PlaybackService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Кнопки уведомления: экстра cmd → в страницу ВК. Пустой intent
         // (перезапуск системой) — просто продолжаем держать foreground.
+        if (intent == null) {
+            return START_STICKY
+        }
         val cmd: String? = intent.getStringExtra(EXTRA_CMD)
         if (cmd != null) {
             dispatch(cmd)
