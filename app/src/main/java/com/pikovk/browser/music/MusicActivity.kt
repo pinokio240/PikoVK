@@ -2,7 +2,9 @@ package com.pikovk.browser.music
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.util.Log
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -11,7 +13,9 @@ import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import com.pikovk.browser.R
 import com.pikovk.browser.media.PlaybackService
+import com.pikovk.browser.media.PlaybackWakeLock
 import com.pikovk.browser.ui.PlaybackWebView
+import com.pikovk.browser.util.Prefs
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -35,13 +39,32 @@ class MusicActivity : AppCompatActivity() {
     private var web: WebView? = null
     private lateinit var container: android.widget.FrameLayout
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_music)
 
         container = findViewById(R.id.musicContainer)
+        buildPlayerWebView()
 
+        // ktx-версия addCallback — как в MainActivity (нужен импорт
+        // androidx.activity.addCallback, без него компилятор ждёт
+        // OnBackPressedCallback и падает с Type mismatch)
+        onBackPressedDispatcher.addCallback(this) {
+            finish()
+        }
+    }
+
+    // Сборка WebView вкладки. Единый метод для запуска и для пересборки
+    // после смерти рендерера (MusicWebClient.onRenderProcessGone) — как
+    // buildWebView в MainActivity.
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun buildPlayerWebView() {
+        // старый WebView (если был) снимаем и уничтожаем до сборки нового
+        val old = web
+        if (old != null) {
+            container.removeView(old)
+            old.destroy()
+        }
         val wv = PlaybackWebView(this)
         val s = wv.settings
         s.javaScriptEnabled = true
@@ -70,13 +93,6 @@ class MusicActivity : AppCompatActivity() {
         // 1.3.23: медиашторка командует плеером музыки; карточка открывает вкладку
         PlaybackService.attachMusicTab(wv)
         wv.loadUrl("file:///android_asset/music.html")
-
-        // ktx-версия addCallback — как в MainActivity (нужен импорт
-        // androidx.activity.addCallback, без него компилятор ждёт
-        // OnBackPressedCallback и падает с Type mismatch)
-        onBackPressedDispatcher.addCallback(this) {
-            finish()
-        }
     }
 
     override fun onStart() {
@@ -88,8 +104,20 @@ class MusicActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        // если звук играет — служба уже поднята мостом в момент старта
-        // трека (упреждение 1.3.22), процесс держится foreground-службой
+        // 1.3.23: страховка фона. Упреждающий запуск службы делает мост в
+        // момент старта трека, но MainActivity к этому моменту может быть
+        // уже уничтожена системой (см. MainActivity.onDestroy), и добор из
+        // её onStop не сработает. Если играет, а службы нет — поднимаем
+        // здесь: onStop вкладки наступает ровно при уходе с экрана, внутри
+        // grace-окна перехода из видимого состояния. Wake-lock держим
+        // независимо от службы — переход трек-к-треку в паузе звука.
+        if (PlaybackService.isPlaying() && Prefs.backgroundPlayback) {
+            val alive = PlaybackService.isRunning()
+            if (!alive) {
+                PlaybackService.start(this)
+            }
+            PlaybackWakeLock.acquire(this)
+        }
     }
 
     override fun onDestroy() {
@@ -108,6 +136,23 @@ class MusicActivity : AppCompatActivity() {
 
     // См. класс: CORS только для аудио-CDN, остальное — насквозь (null).
     private inner class MusicWebClient : WebViewClient() {
+
+        // 1.3.23: смерть процесса рендера без обработчика валит ВЕСЬ процесс
+        // приложения (документированное поведение WebView) — у владельца это
+        // выглядело как «плеер скинулся» при блокировке/сворачивании: под
+        // давлением памяти систему первой убивает именно дочерний рендерер.
+        // Возвращаем true и тихо пересобираем вкладку — как в браузере
+        // (VkWebViewClient.onRenderProcessGone). Очередь плеера живёт в JS
+        // страницы и не восстанавливается — зато приложение остаётся живым,
+        // а шторка честно гаснет (звука больше нет).
+        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+            Log.w("PikoVK-Music", "Процесс рендера вкладки «Музыка» пропал — пересобираю WebView")
+            // флаг «играет» в службе теперь ложь — иначе карточка висит
+            // с кнопками в никуда, а страховка onStop не пускает службу
+            PlaybackService.updateMeta("", "", false)
+            buildPlayerWebView()
+            return true
+        }
 
         override fun shouldInterceptRequest(
             view: WebView,

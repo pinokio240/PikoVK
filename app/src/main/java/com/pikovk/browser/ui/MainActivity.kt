@@ -227,7 +227,12 @@ class MainActivity : AppCompatActivity() {
         }
         wv.addJavascriptInterface(bridge, "VkbBridge")
         // 1.3.21: медиашторка командует этим WebView.
-        PlaybackService.attach(wv)
+        // 1.3.23: но НЕ отбираем ссылку, если играет вкладка «Музыка» —
+        // пересоздание MainActivity поверх играющей вкладки (ROM, память)
+        // не должно уводить команды шторки в браузер.
+        if (!PlaybackService.fromMusicTab) {
+            PlaybackService.attach(wv)
+        }
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
 
         webContainer.addView(
@@ -545,10 +550,15 @@ class MainActivity : AppCompatActivity() {
             PlaybackService.stop(this)
         }
         // 1.3.23: возвращаем шторке ссылку на браузерный WebView — если только
-        // что закрыли вкладку «Музыка», команды шторки снова идут в страницу VK
-        val wvNow = webView
-        if (wvNow != null) {
-            PlaybackService.attach(wvNow)
+        // что закрыли вкладку «Музыка», команды шторки снова идут в страницу VK.
+        // Отбираем ссылку ТОЛЬКО когда источником звука не играет вкладка
+        // «Музыка»: иначе пересоздание MainActivity поверх играющей вкладки
+        // уводит команды шторки в браузер и сбрасывает флаг источника.
+        if (!PlaybackService.fromMusicTab) {
+            val wvNow = webView
+            if (wvNow != null) {
+                PlaybackService.attach(wvNow)
+            }
         }
     }
 
@@ -612,13 +622,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        // 1.3.14: wake-lock больше не нужен — WebView (и звук) уничтожается
-        PlaybackWakeLock.release()
-        // 1.3.21: ссылки на WebView больше нет — команды плееру некуда слать
-        PlaybackService.attach(null)
-        // 1.3.10: приложение закрывается — WebView будет уничтожен, звука
-        // больше нет; убираем уведомление службы воспроизведения
-        PlaybackService.stop(this)
+        // 1.3.23: вкладка «Музыка» лежит в задаче ПОД нами, и систему ничего
+        // не обязывает хранить остановленную активити: при блокировке экрана
+        // или сворачивании прошивка/память УНИЧТОЖАЮТ MainActivity, ПОКА
+        // музыка играет. Раньше onDestroy безусловно гасил службу: процесс
+        // падал в кэш, замораживался (Android 12+), фантомный киллер добивал
+        // рендерер — звук обрывался, вкладка сбрасывалась. Теперь глушим
+        // только если звук — НЕ вкладка «Музыка»; свою смерть она отработает
+        // сама в своём onDestroy.
+        val musicOwnsSound = PlaybackService.fromMusicTab && PlaybackService.isPlaying()
+        if (!musicOwnsSound) {
+            // 1.3.14: wake-lock больше не нужен — WebView (и звук) уничтожается
+            PlaybackWakeLock.release()
+            // 1.3.21: ссылки на WebView больше нет — команды плееру некуда слать
+            PlaybackService.attach(null)
+            // 1.3.10: приложение закрывается — WebView будет уничтожен, звука
+            // больше нет; убираем уведомление службы воспроизведения
+            PlaybackService.stop(this)
+        }
         val wv = webView
         if (wv != null) {
             wv.destroy()

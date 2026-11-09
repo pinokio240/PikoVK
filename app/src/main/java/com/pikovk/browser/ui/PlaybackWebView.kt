@@ -50,4 +50,17 @@ class PlaybackWebView(context: Context) : WebView(context) {
             super.onWindowVisibilityChanged(visibility)
         }
     }
+
+    // 1.3.23: дублируем подмену и на уровне диспетчера. На части прошивок
+    // сигнал видимости доходит до WebView не напрямую, а только по цепочке
+    // dispatchWindowVisibilityChanged от корня иерархии — переопределение
+    // одной лишь точки onWindowVisibilityChanged оставляло дыру, через
+    // которую Chromium узнавал о скрытии страницы и троттлил её таймеры.
+    override fun dispatchWindowVisibilityChanged(visibility: Int) {
+        if (Prefs.backgroundPlayback) {
+            super.dispatchWindowVisibilityChanged(View.VISIBLE)
+        } else {
+            super.dispatchWindowVisibilityChanged(visibility)
+        }
+    }
 }

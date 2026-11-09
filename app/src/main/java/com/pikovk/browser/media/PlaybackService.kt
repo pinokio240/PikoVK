@@ -9,7 +9,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
@@ -62,6 +64,26 @@ class PlaybackService : Service() {
     // что происходит с активити.
     private var cpuLock: PowerManager.WakeLock? = null
 
+    // 1.3.23: страховка от тихой «демотации» службы. Полевые репорты 2025-2026:
+    // часть прошивок через десятки минут сама снимает у FGS статус переднего
+    // плана, ни о чём не сообщая — процесс падает в кэш, заморозка (Android
+    // 12+) глушит звук, а повторный подъём из фона уже запрещён. Лечится
+    // дёшево: пока играет музыка, раз в минуту ЗАНОВО утверждаем
+    // startForeground — это не «старт из фона» (служба уже жива), система
+    // такое разрешает. Fail-open: любая ошибка гасится — звук важнее строгости.
+    private val handler = Handler(Looper.getMainLooper())
+
+    private val keepAlive: Runnable = object : Runnable {
+        override fun run() {
+            val self = instance
+            if (self == null) return // служба уничтожена — цикл больше не нужен
+            if (lastPlaying) {
+                assertForeground()
+            }
+            handler.postDelayed(this, KEEP_ALIVE_MS)
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -96,14 +118,23 @@ class PlaybackService : Service() {
         })
         session.isActive = true
         applyMeta()
-        val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= 34) {
-            ServiceCompat.startForeground(
-                this, SERVICE_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-            )
-        } else {
-            startForeground(SERVICE_ID, notification)
+        assertForeground()
+        handler.postDelayed(keepAlive, KEEP_ALIVE_MS)
+    }
+
+    // Заново утверждаем статус переднего плана (см. keepAlive). Ошибки —
+    // например, редкий отказ системы — глушим: служба и так живёт.
+    private fun assertForeground() {
+        runCatching {
+            val notification = buildNotification()
+            if (Build.VERSION.SDK_INT >= 34) {
+                ServiceCompat.startForeground(
+                    this, SERVICE_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                )
+            } else {
+                startForeground(SERVICE_ID, notification)
+            }
         }
     }
 
@@ -121,6 +152,8 @@ class PlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        // 1.3.23: гасим цикл страховки вместе со службой
+        handler.removeCallbacks(keepAlive)
         runCatching {
             session.isActive = false
             session.release()
@@ -180,6 +213,11 @@ class PlaybackService : Service() {
 
     private fun refreshMeta() {
         applyMeta()
+        // 1.3.23: если сервис после паузы «демотировали», возврат к игре —
+        // момент немедленно вернуть себе передний план, не дожидаясь минуты
+        if (lastPlaying) {
+            assertForeground()
+        }
         val nmService: Any? = getSystemService(Context.NOTIFICATION_SERVICE)
         if (nmService !is NotificationManager) return
         nmService.notify(SERVICE_ID, buildNotification())
@@ -228,6 +266,9 @@ class PlaybackService : Service() {
 
     companion object {
         const val SERVICE_ID = 43
+
+        // 1.3.23: интервал пере-утверждения переднего плана (см. keepAlive)
+        private const val KEEP_ALIVE_MS = 60000L
 
         // 1.3.21: новый канал IMPORTANCE_LOW — MediaStyle-уведомление с
         // кнопками видно в шторке и на локскрине, без звука и без баннеров.
