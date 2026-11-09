@@ -47,8 +47,11 @@ class MusicActivity : AppCompatActivity() {
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
         s.mediaPlaybackRequiresUserGesture = false
-        // приоритет рендерера — как в MainActivity.applySettings (1.3.14)
-        wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
+        // приоритет рендерера — как в MainActivity.applySettings (1.3.14).
+        // 1.3.23: второй аргумент false — рендереру вкладки НЕ разрешаем
+        // «списывание» в невидимости: при сворачивании/блокировке Chromium
+        // иначе может прибить рендерер — звук обрывается, вкладка сбрасывается
+        wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         wv.webViewClient = MusicWebClient()
         wv.addJavascriptInterface(
             MusicBridge(this) { web },
@@ -64,8 +67,8 @@ class MusicActivity : AppCompatActivity() {
             )
         )
         web = wv
-        // 1.3.23: медиашторка командует плеером музыки
-        PlaybackService.attach(wv)
+        // 1.3.23: медиашторка командует плеером музыки; карточка открывает вкладку
+        PlaybackService.attachMusicTab(wv)
         wv.loadUrl("file:///android_asset/music.html")
 
         // ktx-версия addCallback — как в MainActivity (нужен импорт

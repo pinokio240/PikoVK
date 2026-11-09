@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -18,6 +19,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.media.app.NotificationCompat as MediaNotif
 import com.pikovk.browser.R
+import com.pikovk.browser.music.MusicActivity
 import com.pikovk.browser.ui.MainActivity
 
 // Foreground-служба фонового воспроизведения (1.3.10) + медиашторка (1.3.21).
@@ -51,12 +53,29 @@ class PlaybackService : Service() {
 
     private lateinit var session: MediaSessionCompat
 
+    // 1.3.23: собственный частичный wake-lock службы. Раньше процессор для
+    // фоновой музыки держал ТОЛЬКО MainActivity.onStop (acquire при уходе
+    // с экрана), но вкладка «Музыка» живёт ПОВЕРХ MainActivity, и любой
+    // возврат браузера на экран (тап по медиа-карточке в шторке/на
+    // локскрине, пересоздание активити ROM-ом) отпускал ту блокировку.
+    // Служба теперь держит CPU сама, ровно пока живёт, независимо от того,
+    // что происходит с активити.
+    private var cpuLock: PowerManager.WakeLock? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         ensureChannel(this)
+        // wake-lock службы (см. комментарий у поля)
+        val pmService: Any? = getSystemService(Context.POWER_SERVICE)
+        if (pmService is PowerManager) {
+            val wl = pmService.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PikoVK:playbackSvc")
+            wl.setReferenceCounted(false)
+            wl.acquire()
+            cpuLock = wl
+        }
         session = MediaSessionCompat(this, "PikoVK")
         session.setCallback(object : MediaSessionCompat.Callback() {
             override fun onPlay() {
@@ -105,6 +124,12 @@ class PlaybackService : Service() {
         runCatching {
             session.isActive = false
             session.release()
+        }
+        // свой wake-lock службы гасим вместе со службой
+        val held = cpuLock
+        if (held != null) {
+            if (held.isHeld) held.release()
+            cpuLock = null
         }
         instance = null
         super.onDestroy()
@@ -171,8 +196,12 @@ class PlaybackService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        // 1.3.23: тап по карточке ведёт туда, кто сейчас играет: вкладка
+        // «Музыка» — в плеер, страница VK — в браузер (иначе после тапа
+        // браузер лежит ПОВЕРХ плеера и выглядит, будто всё сбросилось)
+        val targetCls = if (fromMusicTab) MusicActivity::class.java else MainActivity::class.java
         val pi = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
+            this, 0, Intent(this, targetCls),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val display = if (lastArtist.isBlank()) lastTitle else lastArtist + " — " + lastTitle
@@ -213,6 +242,10 @@ class PlaybackService : Service() {
         @Volatile var linkedWeb: WebView? = null
             private set
 
+        // 1.3.23: источник команд — вкладка «Музыка» (для тапа по карточке)
+        @Volatile var fromMusicTab: Boolean = false
+            private set
+
         @Volatile private var instance: PlaybackService? = null
         @Volatile private var lastTitle: String = ""
         @Volatile private var lastArtist: String = ""
@@ -225,8 +258,23 @@ class PlaybackService : Service() {
             return i != null
         }
 
+        // 1.3.23: играет ли сейчас музыка (по последнему репорту моста).
+        // Нужен MainActivity.onStart: службу нельзя глушить, пока играет
+        // вкладка «Музыка» — возврат браузера на экран не должен убивать фон.
+        fun isPlaying(): Boolean {
+            return lastPlaying
+        }
+
         fun attach(wv: WebView?) {
             linkedWeb = wv
+            fromMusicTab = false
+        }
+
+        // 1.3.23: источником команд стала вкладка «Музыка» (и карточка будет
+        // открывать её, а не браузер поверх плеера)
+        fun attachMusicTab(wv: WebView?) {
+            linkedWeb = wv
+            fromMusicTab = true
         }
 
         // Поток JS-моста: новые метаданные трека. Служба может не работать
