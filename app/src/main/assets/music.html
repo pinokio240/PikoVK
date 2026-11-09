@@ -38,7 +38,10 @@
   #list{flex:1; overflow-y:auto; overflow-x:hidden; padding:4px 0 12px; -webkit-overflow-scrolling:touch;}
   .trk{display:flex; align-items:center; padding:7px 12px; gap:10px; cursor:pointer;}
   .trk:active{background:var(--bg2);}
-  .trk.cur{background:var(--bg3);}
+  /* 1.3.23 доработка-3: играющий трек видно сразу — полоса слева, цвет
+     названия и анимированный эквалайзер вместо молчаливой подсветки фоном */
+  .trk.cur{background:var(--bg3); box-shadow:inset 3px 0 0 var(--acc);}
+  .trk.cur .tt{color:var(--acc);}
   .cov{
     width:46px; height:46px; border-radius:6px; background:var(--bg3); flex:none;
     background-size:cover; background-position:center;
@@ -54,14 +57,18 @@
     border-radius:8px; padding:1px 5px; opacity:.85;
   }
   .dl{
-    width:30px; height:30px; border-radius:15px; border:none; flex:none;
-    background:var(--bg3); color:var(--tx2); font-size:15px; line-height:1;
+    width:38px; height:38px; border-radius:19px; flex:none;
+    background:var(--bg3); color:var(--acc); border:1px solid var(--acc2);
+    font-size:18px; line-height:1;
     cursor:pointer; display:flex; align-items:center; justify-content:center;
   }
   .dl:active{background:var(--acc2); color:#fff;}
   .eq{display:inline-flex; align-items:flex-end; gap:2px; height:14px; width:14px; flex:none;}
   .eq i{width:3px; background:var(--acc); animation:pulse 1s infinite ease-in-out;}
   .eq i:nth-child(2){animation-delay:.25s;} .eq i:nth-child(3){animation-delay:.5s;}
+  /* 1.3.23 доработка-3: кнопка скачивания в самом плеере — заметная,
+     в тон кнопкам списка (репорт владельца: была мелкая и незаметная) */
+  #bDl{width:36px; height:36px; font-size:17px; color:var(--acc); border:1px solid var(--acc2);}
   @keyframes pulse{0%,100%{height:4px;} 50%{height:14px;}}
   .msg{color:var(--tx2); text-align:center; padding:28px 16px; font-size:13.5px;}
   .msg b{color:var(--tx);}
@@ -144,7 +151,7 @@
     <div class="prow2">
       <div style="display:flex; align-items:center; gap:2px;">
         <div class="time" id="tcur">0:00</div>
-        <button class="btn off" id="bDl" title="Скачать текущий трек" style="width:30px;height:30px;font-size:14px;">⤓</button>
+        <button class="btn off" id="bDl" title="Скачать текущий трек">⤓</button>
       </div>
       <div style="display:flex; gap:6px;">
         <button class="btn off" id="bShuffle" title="Перемешать" style="width:30px;height:30px;font-size:14px;">🔀</button>
@@ -175,6 +182,10 @@ var state = {
   reqId: 0,
   reqKind: {},
   probing: {},
+  // 1.3.23 доработка-3: кэш битрейтов по rawId — раньше ответ probe жил
+  // только в DOM и пропадал при перерисовке списка (репорт владельца:
+  // «качество аудио пропадает из списка»)
+  br: {},
   openedPl: null,       // {owner, id, key, title}
   natPlaying: false,    // зеркало состояния службы (приходит с __vkbMusicPos)
   natHas: false,        // в службе есть трек (даже с чужой сессии вкладки)
@@ -225,6 +236,9 @@ window.__vkbMusicData = function(r){
   var cb = state.reqKind[r.reqId];
   if (r.kind==='bitrate'){
     delete state.reqKind[r.reqId];
+    // кэшируем: перерисовка списка (переход разделов, назад, пагинация)
+    // не должна терять уже узнанное качество
+    if (r.kbps) state.br[r.rawId] = r.kbps;
     var el = document.querySelector('[data-raw="'+r.rawId+'"] .br');
     if (el && r.kbps){ el.textContent = (r.kbps<=200?'~'+r.kbps:r.kbps)+'k'; }
     return;
@@ -239,6 +253,7 @@ window.__vkbMusicData = function(r){
     state.natPlaying = !!r.playing;
     state.natPos = r.pos||0;
     state.natDur = r.dur||0;
+    state.tickAt = Date.now();
     state.natRawId = r.rawId || '';
     $('ptt').textContent = r.title || '—';
     $('par').textContent = r.artist || '';
@@ -279,12 +294,19 @@ function setMsg(html){
 function trackRowHtml(t, idx){
   var restricted = t.restricted ? ' restricted' : '';
   var cov = t.cover ? ' style="background-image:url(\'' + t.cover + '\')"' : '';
+  // эквалайзер у играющего трека (владелец: «в списке не понятно, какой
+  // трек играет»); битрейт из кэша state.br — качество не пропадает
+  // при перерисовке списка
+  var isCur = t.rawId && t.rawId === state.natRawId;
+  var kbps = state.br[t.rawId];
+  var brHtml = kbps ? ((kbps<=200?'~'+kbps:kbps)+'k') : '';
   return '<div class="trk'+restricted+'" data-i="'+idx+'" data-raw="'+esc(t.rawId)+'" data-restricted="'+(t.restricted?1:0)+'">'
     + '<div class="cov"'+cov+'></div>'
     + '<div class="meta"><div class="tt">'+esc(t.title)+'</div>'
     + '<div class="ar">'+esc(t.artist)+'</div></div>'
     + '<div class="side">'
-    + '<span class="br" data-br></span>'
+    + '<span class="eq"'+(isCur?'':' style="display:none"')+'><i></i><i></i><i></i></span>'
+    + '<span class="br" data-br>'+brHtml+'</span>'
     + '<span class="dur">'+fmt(t.duration)+'</span>'
     + (t.restricted ? '' : '<button class="dl" data-dl="'+idx+'" title="Скачать">⤓</button>')
     + '</div></div>';
@@ -565,6 +587,9 @@ function refreshCur(){
     var on = rows[i].getAttribute('data-raw') === state.natRawId;
     rows[i].className = 'trk' + (on ? ' cur' : '')
       + (rows[i].getAttribute('data-restricted')==='1' ? ' restricted' : '');
+    // эквалайзер: показываем только у играющего трека
+    var eq = rows[i].querySelector('.eq');
+    if (eq) eq.style.display = on ? 'inline-flex' : 'none';
   }
 }
 
@@ -685,6 +710,13 @@ function playFromList(idx){
   state.natRawId = t.rawId || '';
   state.natHas = true;
   state.natPlaying = true; // подтверждение придёт с __vkbMusicPos
+  // 1.3.23 доработка-3: новый трек — часы с нуля и секундомер заведён.
+  // Без этого страховочный тикер (если пуши службы потерялись) продолжил
+  // бы со старой позиции, а effDur масштабировал бы ползунок по старой
+  // длительности (находка ревью P3)
+  state.natPos = 0;
+  state.natDur = t.duration || 0;
+  state.tickAt = Date.now();
   highlightRow(idx);
   updatePlayerBar(t);
   try{
@@ -702,6 +734,8 @@ function highlightRow(idx){
     var on = rows[i].getAttribute('data-raw') === rawId;
     rows[i].className = 'trk' + (on ? ' cur' : '')
       + (rows[i].getAttribute('data-restricted')==='1' ? ' restricted' : '');
+    var eq = rows[i].querySelector('.eq');
+    if (eq) eq.style.display = on ? 'inline-flex' : 'none';
   }
 }
 
@@ -754,7 +788,11 @@ window.__vkbMusicPos = function(pos, dur, playing, has, rawId){
   state.natPlaying = !!playing;
   state.natPos = pos||0;
   state.natDur = dur||0;
+  state.tickAt = Date.now(); // живой тик службы — страховочному секундомеру можно спать
   $('bPlay').textContent = playing ? '⏸' : '▶';
+  // трек сменён службой (автопереход) — эквалайзер/подсветка едут сразу,
+  // не дожидаясь пуша карточки
+  if (rawId) refreshCur();
   // сторож зависшего скраба: если drag оборвался без change/touchcancel,
   // через 10 с разрешаем позицию рисоваться снова
   if (scrub){
@@ -804,7 +842,13 @@ $('seek').addEventListener('input', function(){
 $('seek').addEventListener('change', function(){
   var d = effDur();
   if (d > 0){
-    try{ window.VkbMusic.nativeSeek(d * (parseInt($('seek').value,10)/1000)); }catch(e){}
+    var target = d * (parseInt($('seek').value,10)/1000);
+    try{ window.VkbMusic.nativeSeek(target); }catch(e){}
+    // 1.3.23 доработка-3: часы сразу на новое место — иначе при потерянных
+    // пушах страховочный тикер продолжил бы с до-искной позиции (ревью P4).
+    // Живые пуши службы всё равно главные — следующий тик перетрёт
+    state.natPos = Math.round(target);
+    state.tickAt = Date.now();
   }
   scrub = false;
 });
@@ -927,6 +971,23 @@ function renderDownloads(){
 setInterval(function(){
   if (state.section === 'dl') renderDownloads();
 }, 800);
+
+// 1.3.23 доработка-3: страховка таймера. Если пуши позиции из службы
+// потерялись (WebView пересобран, evaluateJavascript не дошёл), а трек
+// играет — секунды считает сама страница. Живые тики службы главные:
+// они обновляют state.tickAt/natPos, и этот секундомер просто молчит.
+setInterval(function(){
+  if (!state.natHas || !state.natPlaying || scrub) return;
+  if (Date.now() - (state.tickAt||0) < 3000) return; // тики живы — не мешаем
+  var d = effDur();
+  // трек кончился (пуши потерялись, очередь службы ушла дальше) — не считаем дальше
+  if (d > 0 && (state.natPos||0) >= d) return;
+  state.natPos = (state.natPos||0) + 1;
+  if (d > 0){
+    $('tcur').textContent = fmt(state.natPos);
+    $('seek').value = Math.min(1000, Math.max(0, Math.round(1000 * state.natPos / d)));
+  }
+}, 1000);
 
 // старт: моя музыка (loadSection сам сбрасывает пагинацию и вешает футер)
 loadSection();

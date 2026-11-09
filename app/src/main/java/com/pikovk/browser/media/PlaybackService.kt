@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -73,6 +74,13 @@ class PlaybackService : Service() {
     // Нативный движок. Все касания — только с главного потока (handler):
     // MediaPlayer того требует, а команды приходят и из JS-моста.
     private var player: MediaPlayer? = null
+
+    // 1.3.23 доработка-3: ход часов тикера (elapsedRealtime прошлого тика).
+    // Нужен для страховки: на части прошивок MediaPlayer.currentPosition
+    // для потоковых источников отдаёт 0 даже во время игры — таймер
+    // владельца стоял на 0:00 при звучащем треке. Пока движок молчит,
+    // секунды считает сам тикер (см. posTick).
+    private var lastTickRealtime: Long = 0
 
     // Сколько секунд отложить после prepare (тап по треку из середины)
     private var pendingSeekSec: Int = 0
@@ -129,8 +137,33 @@ class PlaybackService : Service() {
                 // lastPos для шторки/страницы/nativeState (JS-поток моста).
                 // ЕДИНИЦЫ — СЕКУНДЫ (см. readPosition): раньше сюда попадали
                 // миллисекунды MediaPlayer, и вкладка после возврата из фона
-                // показывала время-белиберду и ползунок в упоре
-                lastPos = readPosition()
+                // показывала время-белиберду и ползунок в упоре.
+                // 1.3.23 доработка-3: движок не всегда отвечает. На части
+                // прошивок currentPosition для потоков возвращает 0 даже при
+                // играющем звуке (репорт владельца: таймер 0:00, ползунок
+                // стоит, звук идёт). Поэтому доверяем движку только тогда,
+                // когда он называет число больше нуля; иначе — секундомер
+                // тикера (+1 за тик, звук-то играет). Как только движок
+                // заговорит (после буферизации/seek), его цифры снова главные.
+                val rp = readPosition()
+                if (rp > 0) {
+                    lastPos = rp
+                } else if (lastPlaying) {
+                    val now = SystemClock.elapsedRealtime()
+                    val dt = now - lastTickRealtime
+                    // правдоподобное окно: меньше 0,5 с — рано суммировать;
+                    // больше 10 с — после сна/шторма на main-потоке «долг»
+                    // не отыгрываем, секундомер просто заводится заново
+                    if (dt >= 500L && dt <= 10000L) {
+                        lastPos = lastPos + (dt + 500L) / 1000L
+                    }
+                }
+                lastTickRealtime = SystemClock.elapsedRealtime()
+                // страховка от убегающих часов (движок врал, секундомер дотянул
+                // дальше длительности) — заперт по длительности трека
+                if (lastDur > 0 && lastPos > lastDur) {
+                    lastPos = lastDur
+                }
                 updateSessionState()
                 pushPosToPage()
             }
@@ -358,6 +391,10 @@ class PlaybackService : Service() {
         val metaDur = obj.optLong("duration", 0)
         lastDur = if (metaDur > 0) metaDur else 0
         lastPos = 0 // старый трек кончился — старую позицию не показываем
+        // 1.3.23 доработка-3: секундомер тикера заводим заново — иначе на
+        // первом тике dt посчитается от загрузки устройства и lastPos
+        // улетит в конец трека (находка ревью P1)
+        lastTickRealtime = SystemClock.elapsedRealtime()
         lastPlaying = false // поднимется в onPrepared, когда звук реально пошёл
         applyMeta()
         pushState() // новая карточка трека → вкладке (если жива)
@@ -398,6 +435,9 @@ class PlaybackService : Service() {
         if (target < 0.0) target = 0.0
         try {
             mp.seekTo((target * 1000.0).toInt())
+            // 1.3.23 доработка-3: часы сразу переставляем — иначе пока движок
+            // молчит (currentPosition=0), секундомер продолжит со старого места
+            lastPos = target.toLong()
         } catch (_: Exception) {
         }
         updateSessionState()
