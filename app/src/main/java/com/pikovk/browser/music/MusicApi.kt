@@ -47,8 +47,9 @@ object MusicApi {
     private const val API_BASE = "https://api.vk.ru/method"
 
     // Кэш битрейта: rawId -> kbps (в памяти процесса, как audioBitrate_<rawId>
-    // в расширении).
-    private val bitrateCache = HashMap<String, Int>()
+    // в расширении). Пробы прилетают параллельно из нескольких JS-потоков
+    // моста — ConcurrentHashMap без ручной синхронизации.
+    private val bitrateCache = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     // ------------------------------------------------------------------
     // Токен
@@ -96,7 +97,9 @@ object MusicApi {
         }
     }
 
-    private fun agent(): String {
+    // UA запросов: тот же, что у WebView браузера — web-сессия VK выдана
+    // именно ему (открыто для TrackDownloader: mp3 качается с UA WebView)
+    fun agent(): String {
         // 1.3.23 фикс: ходим с тем же UA, что и WebView браузера, —
         // web-сессия VK выдана именно этому UA (у расширения запрос идёт
         // из контекста страницы, то есть с UA браузера). Dalvik-UA мог
@@ -499,6 +502,32 @@ object MusicApi {
         return null
     }
 
+    // В мастер-плейлисте (#EXT-X-STREAM-INF) — URL первой дочерней вариации
+    // (потом её скачиваем и разбираем дальше). Для обычного медиа-плейлиста
+    // вернём null — вызывающий разбирает его сам. НЕ путать с
+    // firstHlsSegmentInfo (та уходит в глубину до СЕГМЕНТА — для пробы
+    // битрейта; для скачивания нужен именно URL вариации).
+    fun firstVariantUrl(playlistText: String, baseUrl: String): String? {
+        val lines = playlistText.split("\n")
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i].trim()
+            if (line.startsWith("#EXT-X-STREAM-INF")) {
+                var j = i + 1
+                while (j < lines.size) {
+                    val child = lines[j].trim()
+                    if (child.isNotEmpty() && !child.startsWith("#")) {
+                        return resolveUrl(baseUrl, child)
+                    }
+                    j++
+                }
+                return null
+            }
+            i++
+        }
+        return null
+    }
+
     fun resolveUrl(base: String, rel: String): String {
         if (rel.startsWith("http://") || rel.startsWith("https://")) return rel
         // относительный путь: режем базу до последнего '/'
@@ -513,17 +542,18 @@ object MusicApi {
     // .ts играют VLC/MX Player и большинство плееров). Возвращает файл или null.
     // ------------------------------------------------------------------
 
-    // 1.3.23: открыть поток в «Загрузки» под именем <name>.ts.
-    // Android 10+ — MediaStore.Downloads (без разрешений), 8.0–9 — файл
-    // в публичном каталоге Downloads. Возвращает поток, имя и (на 8–9)
-    // файл для последующего завершения. Закрытие и финализация — finishTsOutput.
-    private fun openTsOutput(ctx: Context, name: String): Triple<OutputStream, String, Any?>? {
-        val safe = sanitize(name) + ".ts"
+    // 1.3.23: открыть файл в «Загрузках» (обобщённый вариант для mp3 и .ts).
+    // Android 10+ — MediaStore.Downloads (без разрешений), 8.0–9 — публичный
+    // каталог Downloads, при отказе (нет права) — свой каталог приложения
+    // (доступен всегда). Возвращает поток, имя и дескриптор для финализации
+    // (finishOutput / dropPartial). Вызывается из фоновых потоков.
+    fun openOutput(ctx: Context, fileName: String, mime: String): Triple<OutputStream, String, Any?>? {
+        val safe = sanitize(fileName)
         if (Build.VERSION.SDK_INT >= 29) {
             try {
                 val values = ContentValues()
                 values.put(MediaStore.MediaColumns.DISPLAY_NAME, safe)
-                values.put(MediaStore.MediaColumns.MIME_TYPE, "video/mp2t")
+                values.put(MediaStore.MediaColumns.MIME_TYPE, mime)
                 values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 values.put(MediaStore.MediaColumns.IS_PENDING, 1)
                 val resolver = ctx.contentResolver
@@ -542,13 +572,45 @@ object MusicApi {
             val f = File(dir, safe)
             return Triple(FileOutputStream(f), safe, f)
         } catch (_: Exception) {
-            return null
+            // публичный каталог недоступен — пишем в свой каталог приложения
+            try {
+                val appDir = ctx.getExternalFilesDir(null)
+                if (appDir == null) return null
+                if (!appDir.exists()) appDir.mkdirs()
+                val f = File(appDir, safe)
+                return Triple(FileOutputStream(f), safe, f)
+            } catch (_: Exception) {
+                return null
+            }
         }
     }
 
-    // 1.3.23: финализация записи (снять IS_PENDING на Android 10+). Успешность
-    // не критична: файл уже записан, недозапись лучше, чем потерять всё.
-    private fun finishTsOutput(ctx: Context, handle: Any?) {
+    // 1.3.23 (доработка): удалить недокачанный/отменённый файл — на
+    // Android 10+ это строка MediaStore (IS_PENDING она и так скрывает
+    // из «Загрузок», но мусор копить не хотим), на 8–9 — обычный файл.
+    fun dropPartial(ctx: Context, handle: Any?) {
+        if (handle == null) return
+        try {
+            if (handle is android.net.Uri) {
+                ctx.contentResolver.delete(handle, null, null)
+            } else if (handle is File) {
+                handle.delete()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    // 1.3.23: открыть поток в «Загрузки» под именем <name>.ts (см. openOutput).
+    private fun openTsOutput(ctx: Context, name: String): Triple<OutputStream, String, Any?>? {
+        return openOutput(ctx, name + ".ts", "video/mp2t")
+    }
+
+    // 1.3.23 (доработка): финализация записи (снять IS_PENDING на Android
+    // 10+) — публичная: зовут и downloadHls, и TrackDownloader.downloadMp3.
+    // Без этого mp3 навсегда остаётся pending и НЕ ВИДЕН в «Загрузках».
+    // Успешность не критична: файл уже записан, недозапись лучше, чем
+    // потерять всё.
+    fun finishOutput(ctx: Context, handle: Any?) {
         if (handle == null) return
         if (Build.VERSION.SDK_INT >= 29 && handle is android.net.Uri) {
             try {
@@ -562,22 +624,30 @@ object MusicApi {
 
     // Скачивание HLS-потока: плейлист -> сегменты подряд -> один файл .ts в
     // «Загрузках» (конвертации в mp3 нет — её у VK Next делают ffmpeg.wasm/
-    // сервер; .ts играют VLC/MX Player и большинство плееров). Возвращает
-    // имя файла или null.
-    fun downloadHls(ctx: Context, url: String, name: String, onProgress: (Int) -> Unit): String? {
+    // сервер; .ts играют VLC/MX Player и большинство плееров). Прогресс —
+    // в процентах сегментов; cancelled() — отмена из диспетчера: загрузка
+    // останавливается на очередном сегменте, недокачанное удаляется.
+    // Возвращает имя файла или null.
+    fun downloadHls(
+        ctx: Context,
+        url: String,
+        name: String,
+        onProgress: (Int) -> Unit,
+        cancelled: () -> Boolean
+    ): String? {
         try {
             val raw: String? = SimpleHttp.get(url, "", agent(), 262144)
             if (raw == null) return null
             var text = raw
             var base = url
-            // мастер-плейлист -> первая вариация
+            // мастер-плейлист -> URL первой вариации, затем её плейлист
             if (text.contains("#EXT-X-STREAM-INF")) {
-                val child: Pair<String, Double>? = firstHlsSegmentInfo(text, base)
-                if (child == null) return null
-                val childText: String? = SimpleHttp.get(child.first, "", agent(), 262144)
+                val variant: String? = firstVariantUrl(text, base)
+                if (variant == null) return null
+                val childText: String? = SimpleHttp.get(variant, "", agent(), 262144)
                 if (childText == null) return null
                 text = childText
-                base = child.first
+                base = variant
             }
             val segs = ArrayList<String>()
             val lines = text.split("\n")
@@ -592,13 +662,18 @@ object MusicApi {
             val out = openTsOutput(ctx, name)
             if (out == null) return null
             val stream = out.first
-            val buf = ByteArray(65536)
+            var completed = true
             var done = 0
             try {
                 for (i in segs.indices) {
+                    if (cancelled()) {
+                        completed = false
+                        break
+                    }
                     val opened = java.net.URL(segs[i]).openConnection()
                     if (opened !is java.net.HttpURLConnection) {
-                        return null
+                        completed = false
+                        break
                     }
                     opened.connectTimeout = 15000
                     opened.readTimeout = 20000
@@ -606,9 +681,11 @@ object MusicApi {
                     val code = opened.responseCode
                     if (code !in 200..299) {
                         opened.disconnect()
-                        return null
+                        completed = false
+                        break
                     }
                     opened.inputStream.use { ins ->
+                        val buf = ByteArray(65536)
                         while (true) {
                             val n = ins.read(buf)
                             if (n < 0) break
@@ -619,10 +696,21 @@ object MusicApi {
                     done++
                     onProgress((done * 100) / segs.size)
                 }
+            } catch (_: Exception) {
+                completed = false
             } finally {
-                stream.close()
-                finishTsOutput(ctx, out.third)
+                try {
+                    stream.close()
+                } catch (_: Exception) {
+                }
+                if (completed) {
+                    finishOutput(ctx, out.third)
+                } else {
+                    // недокачанный/отменённый .ts не оставляем
+                    dropPartial(ctx, out.third)
+                }
             }
+            if (!completed) return null
             return out.second
         } catch (_: Exception) {
             return null

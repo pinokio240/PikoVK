@@ -1,12 +1,12 @@
 package com.pikovk.browser.music
 
+import android.app.Activity
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.widget.Toast
-import com.pikovk.browser.bridge.VkbBridge
 import com.pikovk.browser.media.PlaybackService
 import org.json.JSONArray
 import org.json.JSONObject
@@ -19,9 +19,23 @@ import org.json.JSONObject
 //   playlists(offset)       — плейлисты (audio.getPlaylists)
 //   pltracks(payload)       — треки плейлиста {owner, id, key, offset}
 //   probe(rawId, url, hls, duration) — проба битрейта (кэш в MusicApi)
-//   download(payload)       — скачивание {url, hls, name, rawId}
-//   nativePlay(payload)     — ИГРАТЬ трек в службе {url,title,artist,
-//                             duration,rawId,seek} (1.3.23)
+//   download(payload)       — скачивание {url, hls, name, rawId} — через
+//                             диспетчер TrackDownloader (прогресс/отмена
+//                             видны во вкладке «Загрузки»)
+//   downloadCurrent()       — скачать тот трек, что играет сейчас
+//                             (кнопка в самом плеере)
+//   getDownloads()          — снимок диспетчера загрузок (строкой —
+//                             JS-мост умеет возвращать значения)
+//   cancelDownload(id)      — отменить задачу загрузки
+//   nativeQueue(payload)    — ОЧЕРЕДЬ от вкладки в службу {tracks, index,
+//                             shuffle, repeat}: дальше служба играет и
+//                             переходит сама (1.3.23, доработка)
+//   nativeShift(dir)        — вперёд/назад по очереди службы (dir=1/-1;
+//                             назад с откатом в начало трека)
+//   nativeMode(shuffle, repeat) — режимы воспроизведения в службе
+//   exitTab()               — кнопка «‹ ВК»: вернуться к вкладке браузера
+//   nativePlay(payload)     — одиночный трек в службу (оставлен для
+//                             совместимости, вкладка использует nativeQueue)
 //   nativePause/nativeResume/nativeSeek(sec) — управление движком службы
 //   syncPlayer()            — свежая вкладка забирает состояние службы
 //
@@ -158,8 +172,9 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         }.start()
     }
 
-    // Скачивание: mp3 — в системный DownloadManager (общий путь VkbBridge),
-    // HLS — сегменты в один .ts (см. MusicApi.downloadHls).
+    // Скачивание: единая точка — диспетчер TrackDownloader (mp3 и HLS,
+    // прогресс и отмена видны во вкладке «Загрузки»). Системный
+    // DownloadManager остался на страницах VK (VkbBridge.enqueueNamed).
     @JavascriptInterface
     fun download(payload: String) {
         Thread {
@@ -172,23 +187,69 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
                     toastMain("Ссылки нет — обновите список")
                     return@Thread
                 }
-                if (hls != 0) {
-                    val dlName: String = if (name == null || name.isEmpty()) "трек" else name
-                    toastMain("Скачиваю: " + dlName + "…")
-                    val saved = MusicApi.downloadHls(context, url, if (name == null || name.isEmpty()) "vk_track" else name) { }
-                    if (saved != null) {
-                        toastMain("Готово: " + saved + " (в «Загрузках»)")
-                    } else {
-                        toastMain("Не удалось скачать HLS-поток")
-                    }
-                } else {
-                    val fileName = MusicApi.sanitize(if (name == null || name.isEmpty()) "vk_track" else name) + ".mp3"
-                    VkbBridge.enqueueNamed(context, url, fileName)
-                }
+                val dlName: String = if (name == null || name.isEmpty()) "vk_track" else name
+                TrackDownloader.enqueue(context, url, hls != 0, dlName)
+                toastMain("Скачиваю: " + dlName + "…")
             } catch (_: Exception) {
                 toastMain("Не удалось начать скачивание")
             }
         }.start()
+    }
+
+    // 1.3.23: скачать тот трек, что играет сейчас (кнопка в самом плеере).
+    // Данные берём из службы — она хранит ссылку/имя текущего трека, поэтому
+    // работает и после пересоздания вкладки, и для очереди из другого списка.
+    @JavascriptInterface
+    fun downloadCurrent() {
+        Thread {
+            try {
+                val info = JSONObject(PlaybackService.currentDownload())
+                val url: String? = info.optString("url", "")
+                if (url == null || url.isEmpty()) {
+                    toastMain("Ссылки нет — запустите трек заново")
+                    return@Thread
+                }
+                val name: String? = info.optString("name", "")
+                val dlName: String = if (name == null || name.isEmpty()) "vk_track" else name
+                val hls = info.optInt("hls", 0)
+                TrackDownloader.enqueue(context, url, hls != 0, dlName)
+                toastMain("Скачиваю: " + dlName + "…")
+            } catch (_: Exception) {
+                toastMain("Не удалось начать скачивание")
+            }
+        }.start()
+    }
+
+    // 1.3.23: снимок диспетчера загрузок для вкладки «Загрузки». JS-мост
+    // умеет возвращать строку — отдельные reqId и каналы ответа не нужны.
+    @JavascriptInterface
+    fun getDownloads(): String {
+        return try {
+            TrackDownloader.snapshot()
+        } catch (_: Exception) {
+            "[]"
+        }
+    }
+
+    // 1.3.23: отменить задачу загрузки (кнопка ✕ во вкладке «Загрузки»)
+    @JavascriptInterface
+    fun cancelDownload(id: Int) {
+        try {
+            TrackDownloader.cancel(id)
+        } catch (_: Exception) {
+        }
+    }
+
+    // 1.3.23: кнопка «‹ ВК» в шапке вкладки — вернуться к вкладке браузера
+    @JavascriptInterface
+    fun exitTab() {
+        main.post {
+            try {
+                val act = context
+                if (act is Activity) act.finish()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun toastMain(msg: String) {
@@ -197,14 +258,47 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         }
     }
 
-    // 1.3.23: воспроизведение уехало в службу (нативный MediaPlayer).
-    // Вкладка — пульт: отдала трек и управляет; звук не зависит от жизни
-    // WebView. Старт службы ПОКА экран виден — тот же принцип упреждения
-    // 1.3.22 (Android «Background audio hardening»).
+    // 1.3.23 (доработка): воспроизведение и ОЧЕРЕДЬ живут в службе.
+    // Вкладка — пульт: отдала список и номер — служба сама играет, сама
+    // переходит к следующему по завершению/ошибке, сама обрабатывает
+    // шторку/гарнитуру. Список отдаётся через nativeQueue, кнопки
+    // вперёд/назад — nativeShift. Старт службы ПОКА экран виден — тот же
+    // принцип упреждения 1.3.22 (Android «Background audio hardening»).
     @JavascriptInterface
     fun nativePlay(payload: String) {
         try {
             PlaybackService.nPlay(context, payload)
+        } catch (_: Exception) {
+        }
+    }
+
+    // 1.3.23 (доработка): очередь + номер играющего — службе
+    @JavascriptInterface
+    fun nativeQueue(payload: String) {
+        try {
+            PlaybackService.nQueue(context, payload)
+        } catch (_: Exception) {
+        }
+    }
+
+    // 1.3.23 (доработка): вперёд/назад по очереди службы (dir = 1 или -1)
+    @JavascriptInterface
+    fun nativeShift(dir: Int) {
+        try {
+            if (dir < 0) {
+                PlaybackService.nPrev()
+            } else {
+                PlaybackService.nShift(dir)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    // 1.3.23 (доработка): режимы воспроизведения — службе
+    @JavascriptInterface
+    fun nativeMode(shuffle: Int, repeat: String) {
+        try {
+            PlaybackService.nMode(shuffle, repeat)
         } catch (_: Exception) {
         }
     }

@@ -30,6 +30,7 @@ import androidx.media.app.NotificationCompat as MediaNotif
 import com.pikovk.browser.R
 import com.pikovk.browser.music.MusicActivity
 import com.pikovk.browser.ui.MainActivity
+import org.json.JSONArray
 import org.json.JSONObject
 
 // Foreground-служба фонового воспроизведения (1.3.10) + медиашторка (1.3.21)
@@ -47,10 +48,13 @@ import org.json.JSONObject
 // трек — отдала его службе через мост (VkbMusic.nativePlay), служба играет
 // сама. Служба переживает закрытие вкладки, уничтожение обеих активити и
 // сворачивание: уведомление MediaStyle с кнопками и позицией работает
-// всегда. Очередь/шаффл/повтор живут в странице (как у VK Music Player):
-// конец трека служба репортит странице, страница решает, что дальше, и
-// запускает следующий трек через nativePlay. Вкладка закрыта — трек просто
-// доигрывает и встаёт на паузу.
+// всегда. Очередь/шаффл/повтор живут в САМОЙ СЛУЖБЕ (доработка 1.3.23):
+// вкладка один раз отдала список и номер трека (nativeQueue) — дальше
+// служба сама играет, сама переходит к следующему по завершению/ошибке,
+// сама обрабатывает next/prev из шторки и гарнитуры. Раньше очередь жила
+// в JS страницы: после пересоздания вкладки (закрыл, рендерер умер,
+// активити убита) она пустовала — кнопка «вперёд» и автопереход молча
+// не работали, а шторка без вкладки не могла переключить трек вообще.
 //
 // Остальные механизмы выживания на месте: FGS mediaPlayback (тип в
 // манифесте + FOREGROUND_SERVICE_MEDIA_PLAYBACK), упреждающий запуск из
@@ -79,6 +83,11 @@ class PlaybackService : Service() {
 
     // Наушники вынули — честная пауза
     private var noisyRegistered: Boolean = false
+
+    // 1.3.23: подряд идущие мёртвые ссылки (ошибка при prepare/старте).
+    // Обнуляется в onPrepared; когда достигает размера очереди — дальше
+    // не шагаем (иначе вечный цикл по списку битых треков).
+    private var errStreak: Int = 0
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -211,6 +220,7 @@ class PlaybackService : Service() {
         resetEngine()
         abandonFocus()
         pendingPlay = null // брошенных треков не оставляем
+        pendingQueue = null // и брошенную очередь тоже
         runCatching {
             session.isActive = false
             session.release()
@@ -232,6 +242,13 @@ class PlaybackService : Service() {
     // Трек от вкладки: {url, title, artist, duration, rawId, seek}. JS-поток
     // моста приходит сюда через companion.nPlay — уже на главном потоке.
     fun consumePending() {
+        // 1.3.23: очередь от вкладки приоритетнее одиночного трека
+        val q = pendingQueue
+        if (q != null) {
+            pendingQueue = null
+            applyQueue(q)
+            return
+        }
         val p = pendingPlay
         if (p == null) return
         pendingPlay = null
@@ -267,6 +284,7 @@ class PlaybackService : Service() {
             )
             mp.setDataSource(url)
             mp.setOnPreparedListener { prepared ->
+                errStreak = 0 // живая ссылка — счётчик битых сбрасываем
                 // длительность из потока честнее метаданных VK
                 val d = prepared.duration.toLong()
                 if (d > 0) lastDur = d / 1000L
@@ -287,21 +305,26 @@ class PlaybackService : Service() {
                 refreshNotification()
             }
             mp.setOnCompletionListener {
-                // трек доиграл: страница ведёт очередь (повтор/следующий)
+                // трек доиграл: очередь ведёт сама служба — переход случится
+                // даже если вкладка давно закрыта или рендерер мёртв. Шаг
+                // через post: release() плеера из его же колбэка на части
+                // прошивок приводит к падению
                 lastPlaying = false
                 updateSessionState()
                 refreshNotification()
-                pageJs("window.__vkbMusicEnded&&window.__vkbMusicEnded();")
+                handler.post { shiftQueue(1, true) }
             }
             mp.setOnErrorListener { _, _, _ ->
-                // битая ссылка/сеть: честно ступаем на паузу и просим
-                // страницу перейти дальше — как делает обычный плеер
+                // битая ссылка/сеть: честно ступаем на паузу и идём дальше
+                // по очереди, пока не упрёмся в лимит битых подряд
                 runCatching {
                     lastPlaying = false
-                    resetEngine()
+                    errStreak++
                     updateSessionState()
                     refreshNotification()
-                    pageJs("window.__vkbMusicEnded&&window.__vkbMusicEnded();")
+                    if (errStreak < queueSize()) {
+                        handler.post { shiftQueue(1, true) }
+                    }
                 }
                 true
             }
@@ -309,10 +332,13 @@ class PlaybackService : Service() {
         } catch (_: Exception) {
             runCatching { mp.release() }
             lastPlaying = false
+            errStreak++
             updateSessionState()
             refreshNotification()
-            // битая ссылка упала СИНХРОННО — страница должна уйти к следующему
-            pageJs("window.__vkbMusicEnded&&window.__vkbMusicEnded();")
+            // битая ссылка упала СИНХРОННО — если очередь жива, шагаем дальше
+            if (errStreak < queueSize()) {
+                handler.post { shiftQueue(1, true) }
+            }
             return
         }
         player = mp
@@ -320,10 +346,18 @@ class PlaybackService : Service() {
         lastTitle = if (title == null) "" else title
         lastArtist = if (artist == null) "" else artist
         lastRawId = if (rawId == null) "" else rawId
+        // 1.3.23: запоминаем ссылку/обложку текущего трека — нужны вкладке
+        // для «скачать то, что играет» и для карточки после пересоздания
+        lastUrl = url
+        lastHls = obj.optInt("hls", 0)
+        val cov: String? = obj.optString("cover", "")
+        lastCover = if (cov == null) "" else cov
         val metaDur = obj.optLong("duration", 0)
-        if (metaDur > 0) lastDur = metaDur
+        lastDur = if (metaDur > 0) metaDur else 0
+        lastPos = 0 // старый трек кончился — старую позицию не показываем
         lastPlaying = false // поднимется в onPrepared, когда звук реально пошёл
         applyMeta()
+        pushState() // новая карточка трека → вкладке (если жива)
         refreshNotification()
     }
 
@@ -385,6 +419,174 @@ class PlaybackService : Service() {
         }
         pendingSeekSec = 0
         nativeActive = false
+    }
+
+    // ------------------------------------------------------------------
+    // Очередь воспроизведения (1.3.23) — живёт здесь, а не в странице.
+    // Страница отдала список и номер (applyQueue), дальше служба сама
+    // ведёт воспроизведение: переход по завершению/ошибке, next/prev
+    // из шторки и гарнитуры, шаффл и повтор. Все касания очереди — только
+    // с главного потока (handler), как и у движка.
+    // ------------------------------------------------------------------
+
+    // Применить очередь от вкладки: {tracks:[...], index:N, shuffle:0|1,
+    // repeat:'default'|'all'|'one'}. Треки — уже нормализованные объекты
+    // из music.html (url развёрнут в MusicApi).
+    private fun applyQueue(payload: String) {
+        val obj: JSONObject? = try {
+            JSONObject(payload)
+        } catch (_: Exception) {
+            null
+        }
+        if (obj == null) return
+        val tracks: JSONArray? = obj.optJSONArray("tracks")
+        if (tracks == null || tracks.length() == 0) return
+        var index = obj.optInt("index", 0)
+        if (index < 0 || index >= tracks.length()) index = 0
+        queueTracks = tracks.toString()
+        queueShuffle = obj.optInt("shuffle", 0) != 0
+        val rep: String? = obj.optString("repeat", "default")
+        queueRepeat = if (rep == null || rep.isEmpty()) "default" else rep
+        rebuildOrder(index)
+        val t = trackAt(index)
+        if (t == null) return
+        startNative(t.toString())
+    }
+
+    // Сколько треков в очереди (0 — очередь пуста или битая)
+    private fun queueSize(): Int {
+        val arr: JSONArray? = try {
+            JSONArray(queueTracks)
+        } catch (_: Exception) {
+            null
+        }
+        if (arr == null) return 0
+        return arr.length()
+    }
+
+    // Трек очереди по индексу (null — вне диапазона)
+    private fun trackAt(i: Int): JSONObject? {
+        val arr: JSONArray? = try {
+            JSONArray(queueTracks)
+        } catch (_: Exception) {
+            null
+        }
+        if (arr == null) return null
+        if (i < 0 || i >= arr.length()) return null
+        return arr.optJSONObject(i)
+    }
+
+    // Порядок обхода очереди: подряд при обычном режиме, перемешанный при
+    // шаффле (выбранный трек — первым, как у обычных плееров)
+    private fun rebuildOrder(startTrack: Int) {
+        val n = queueSize()
+        val list = ArrayList<Int>()
+        for (i in 0 until n) list.add(i)
+        if (queueShuffle) {
+            // Фишер—Йетс
+            var i = n - 1
+            while (i > 0) {
+                val j = (Math.random() * (i + 1)).toInt()
+                val tmp = list[i]
+                list[i] = list[j]
+                list[j] = tmp
+                i--
+            }
+            val pos = list.indexOf(startTrack)
+            if (pos > 0) {
+                val picked = list[pos]
+                list.removeAt(pos)
+                list.add(0, picked)
+            }
+            orderPos = 0
+        } else {
+            orderPos = if (startTrack in 0 until n) startTrack else 0
+        }
+        queueIndex = if (startTrack in 0 until n) startTrack else 0
+        val arr = JSONArray()
+        for (v in list) arr.put(v)
+        queueOrder = arr.toString()
+    }
+
+    // Шаг по очереди. auto=true — переход по завершению/ошибке трека
+    // (строгие правила повтора), false — команда пользователя (кнопки
+    // вкладки, шторка: по концу списка перекатываемся в начало).
+    private fun shiftQueue(dir: Int, auto: Boolean) {
+        val n = queueSize()
+        if (n == 0) return // очередь не задана — нечего переключать
+        val orderArr: JSONArray? = try {
+            JSONArray(queueOrder)
+        } catch (_: Exception) {
+            null
+        }
+        if (orderArr == null || orderArr.length() != n) {
+            // порядок потерян — пересобираем по текущему режиму
+            rebuildOrder(queueIndex)
+        }
+        // повтор одного трека: только для автоперехода, кнопками пользователь
+        // управляет сам
+        if (auto && dir == 1 && queueRepeat == "one") {
+            val same = trackAt(queueIndex)
+            if (same != null) startNative(same.toString())
+            return
+        }
+        var pos = orderPos
+        if (pos < 0 || pos >= n) pos = 0
+        pos += dir
+        if (pos >= n) {
+            if (auto && queueRepeat != "all") {
+                // список доигран, повтора нет — остаёмся на паузе
+                return
+            }
+            pos = 0
+        }
+        if (pos < 0) {
+            pos = if (queueRepeat == "all") n - 1 else 0
+        }
+        val order = try {
+            JSONArray(queueOrder)
+        } catch (_: Exception) {
+            return
+        }
+        val trackIdx = order.optInt(pos, -1)
+        if (trackIdx < 0 || trackIdx >= n) return
+        val t = trackAt(trackIdx)
+        if (t == null) return
+        val u: String? = t.optString("url", "")
+        if (u == null || u.isEmpty()) {
+            // пустая ссылка — мёртвый трек: счётчик как у ошибок MediaPlayer
+            // и шаг дальше, иначе плеер молча застрянет на паузе
+            errStreak++
+            if (errStreak < n) {
+                handler.post { shiftQueue(dir, auto) }
+            }
+            return
+        }
+        orderPos = pos
+        queueIndex = trackIdx
+        startNative(t.toString())
+    }
+
+    // «Назад» из шторки/гарнитуры/вкладки: в начале трека — в начало,
+    // иначе предыдущий (как у обычных плееров)
+    private fun prevFromNotif() {
+        if (lastPos > 3000) {
+            seekNative(0.0)
+        } else {
+            shiftQueue(-1, false)
+        }
+    }
+
+    // Смена режима из вкладки (шаффл/повтор). Порядок пересобираем только
+    // при переключении шаффла — текущий трек остаётся на месте.
+    private fun applyMode(shuffle: Boolean, repeat: String) {
+        val rep: String = if (repeat.isEmpty()) "default" else repeat
+        val shuffleChanged = shuffle != queueShuffle
+        queueShuffle = shuffle
+        queueRepeat = rep
+        if (shuffleChanged) {
+            rebuildOrder(queueIndex)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -475,7 +677,8 @@ class PlaybackService : Service() {
     // ------------------------------------------------------------------
 
     // Команда от кнопок шторки. Нативное (пауза/плей/переключение) работает
-    // даже без вкладки; next/prev — очередь в странице.
+    // даже без вкладки: next/prev ведёт очередь самой службы; pageJs нужен
+    // только когда играет СТРАНИЦА VK (нативный движок пуст).
     private fun dispatch(cmd: String) {
         if (nativeActive) {
             if (cmd == "toggle") {
@@ -489,6 +692,21 @@ class PlaybackService : Service() {
             if (cmd == "play" || cmd == "resume") {
                 resumeNative()
                 return
+            }
+            // 1.3.23: next/prev ведёт сама служба — шторка и гарнитура
+            // переключают треки даже с закрытой вкладкой. Очередь пуста —
+            // отдаём старому хуку страницы (там своя логика).
+            if (cmd == "next") {
+                if (queueSize() > 0) {
+                    shiftQueue(1, false)
+                    return
+                }
+            }
+            if (cmd == "prev") {
+                if (queueSize() > 0) {
+                    prevFromNotif()
+                    return
+                }
             }
         }
         pageJs("window.__vkbPlayerCmd&&window.__vkbPlayerCmd('" + cmd + "');")
@@ -562,6 +780,8 @@ class PlaybackService : Service() {
     }
 
     // Позиция → вкладка «Музыка» (ползунок и тайминги в UI страницы).
+    // rawId пятым аргументом: вкладка без своей очереди (свежая/пересобранная)
+    // всё равно знает, какой трек играет.
     private fun pushPosToPage() {
         if (!fromMusicTab) return // страница VK не понимает эти хуки
         val wv = linkedWeb
@@ -569,12 +789,19 @@ class PlaybackService : Service() {
         val playFlag = if (lastPlaying) 1 else 0
         val js = "window.__vkbMusicPos&&window.__vkbMusicPos(" +
             lastPos + "," + lastDur + "," + playFlag + "," +
-            (if (nativeActive) 1 else 0) + ");"
+            (if (nativeActive) 1 else 0) + ",'" + lastRawId + "');"
         wv.post {
             runCatching {
                 wv.evaluateJavascript(js, null)
             }
         }
+    }
+
+    // Полная карточка трека → вкладка «Музыка» (при смене трека): название,
+    // исполнитель, обложка, режимы. Вызывается только с main-потока.
+    private fun pushState() {
+        if (!fromMusicTab) return
+        pageJs("window.__vkbMusicData&&window.__vkbMusicData(" + nativeState() + ");")
     }
 
     private fun refreshNotification() {
@@ -676,6 +903,22 @@ class PlaybackService : Service() {
         @Volatile private var lastRawId: String = ""
         @Volatile private var pendingPlay: String? = null
 
+        // 1.3.23: ОЧЕРЕДЬ ЖИВЁТ ЗДЕСЬ (снимки в JSON, касание — main-поток).
+        // Страница отдаёт список и номер — дальше служба ведёт сама.
+        @Volatile private var queueTracks: String = "[]"
+        @Volatile private var queueOrder: String = "[]"
+        @Volatile private var orderPos: Int = -1
+        @Volatile private var queueIndex: Int = -1
+        @Volatile private var queueShuffle: Boolean = false
+        @Volatile private var queueRepeat: String = "default"
+        @Volatile private var pendingQueue: String? = null
+
+        // 1.3.23: текущий трек — ссылка/обложка/тип. Нужны вкладке для
+        // «скачать то, что играет» и для карточки после пересоздания.
+        @Volatile private var lastUrl: String = ""
+        @Volatile private var lastHls: Int = 0
+        @Volatile private var lastCover: String = ""
+
         // 1.3.22: без повторного startForegroundService, если служба живёт.
         fun isRunning(): Boolean {
             val i = instance
@@ -746,6 +989,83 @@ class PlaybackService : Service() {
             }
         }
 
+        // 1.3.23: вкладка отдала ОЧЕРЕДЬ. Служба жива — применяем сразу;
+        // нет — запоминаем и поднимаем службу (как nPlay, тот же принцип
+        // упреждения: старт из видимого состояния вкладки).
+        fun nQueue(ctx: Context, payload: String) {
+            val svc = instance
+            if (svc != null) {
+                pendingQueue = null
+                svc.handler.post {
+                    val alive = instance
+                    if (alive != null) alive.applyQueue(payload)
+                }
+            } else {
+                pendingQueue = payload
+                try {
+                    start(ctx)
+                } catch (_: Exception) {
+                    // систему не устроил старт из фона — не оставляем
+                    // брошенную очередь в буфере
+                    pendingQueue = null
+                }
+            }
+        }
+
+        // 1.3.23: вперёд/назад от вкладки-пульта. Служба не запущена —
+        // переключать нечего, молча выходим.
+        fun nShift(dir: Int) {
+            val svc = instance
+            if (svc != null) {
+                svc.handler.post {
+                    val alive = instance
+                    if (alive != null) alive.shiftQueue(dir, false)
+                }
+            }
+        }
+
+        // 1.3.23: «назад» с откатом в начало трека (как у обычных плееров)
+        fun nPrev() {
+            val svc = instance
+            if (svc != null) {
+                svc.handler.post {
+                    val alive = instance
+                    if (alive != null) alive.prevFromNotif()
+                }
+            }
+        }
+
+        // 1.3.23: режимы воспроизведения из вкладки (шаффл/повтор)
+        fun nMode(shuffle: Int, repeat: String) {
+            val svc = instance
+            if (svc != null) {
+                svc.handler.post {
+                    val alive = instance
+                    if (alive != null) alive.applyMode(shuffle != 0, repeat)
+                }
+            }
+        }
+
+        // 1.3.23: что играет сейчас — для «скачать текущий трек» во вкладке
+        fun currentDownload(): String {
+            val obj = JSONObject()
+            try {
+                obj.put("url", lastUrl)
+                obj.put("hls", lastHls)
+                var name = ""
+                if (lastArtist.isNotEmpty() && lastTitle.isNotEmpty()) {
+                    name = lastArtist + " - " + lastTitle
+                } else if (lastTitle.isNotEmpty()) {
+                    name = lastTitle
+                } else if (lastArtist.isNotEmpty()) {
+                    name = lastArtist
+                }
+                obj.put("name", name)
+            } catch (_: Exception) {
+                // JSON не собрался — вкладка покажет «ссылки нет»
+            }
+            return obj.toString()
+        }
         fun nPause() {
             val svc = instance
             if (svc != null) {
@@ -776,7 +1096,9 @@ class PlaybackService : Service() {
             }
         }
 
-        // Снимок состояния нативного плеера для свежей вкладки (syncPlayer).
+        // Снимок состояния нативного плеера для свежей вкладки (syncPlayer
+        // и пуш при смене трека): вместе с метаданными отдаём обложку и
+        // режимы — вкладка после пересоздания оживает целиком.
         fun nativeState(): String {
             val obj = JSONObject()
             try {
@@ -787,6 +1109,9 @@ class PlaybackService : Service() {
                 obj.put("rawId", lastRawId)
                 obj.put("playing", if (lastPlaying) 1 else 0)
                 obj.put("dur", lastDur)
+                obj.put("cover", lastCover)
+                obj.put("shuffle", if (queueShuffle) 1 else 0)
+                obj.put("repeat", queueRepeat)
                 // позицию берём из кэша тикера: MediaPlayer трогаем только
                 // с main-потока, а syncPlayer приходит из JS-потока моста
                 obj.put("pos", lastPos)

@@ -76,6 +76,12 @@
     display:none; border:none; background:var(--bg3); color:var(--tx);
     border-radius:15px; padding:6px 14px; font-size:13px; cursor:pointer;
   }
+  /* «‹ ВК» — возврат к вкладке браузера (1.3.23 доработка) */
+  .exit{
+    border:none; background:var(--bg3); color:var(--tx); white-space:nowrap;
+    border-radius:15px; padding:6px 12px; font-size:13px; cursor:pointer;
+  }
+  .exit:active{background:var(--acc2); color:#fff;}
   /* Низ: плеер */
   #player{border-top:1px solid var(--line); background:var(--bg2); padding:8px 12px 10px;}
   #seek{width:100%; height:4px; -webkit-appearance:none; background:var(--bg3); border-radius:2px; outline:none; margin:2px 0 8px;}
@@ -96,11 +102,17 @@
   .btn.on{color:var(--acc);}
   .prow2{display:flex; align-items:center; justify-content:space-between; margin-top:2px;}
   .time{color:var(--tx2); font-size:11px; font-variant-numeric:tabular-nums;}
+  /* вкладка «Загрузки» (1.3.23 доработка) */
+  .dlrow{display:flex; align-items:center; gap:10px; padding:8px 12px;}
+  .dlic{width:30px; height:30px; flex:none; display:flex; align-items:center; justify-content:center; font-size:16px;}
+  .dlbar{height:3px; background:var(--bg3); border-radius:2px; margin-top:5px; overflow:hidden;}
+  .dlbar i{display:block; height:100%; background:var(--acc); border-radius:2px;}
 </style>
 </head>
 <body>
   <div class="head">
     <div class="row">
+      <button class="exit" id="exitTab" title="Вернуться к вкладке ВК">‹ ВК</button>
       <div class="logo">Piko<span>VK</span> Музыка</div>
       <button class="back" id="back">‹ Назад</button>
     </div>
@@ -111,6 +123,7 @@
       <button class="tab on" data-s="my">Моя музыка</button>
       <button class="tab" data-s="pl">Плейлисты</button>
       <button class="tab" data-s="sr">Поиск</button>
+      <button class="tab" data-s="dl">Загрузки</button>
     </div>
   </div>
 
@@ -129,7 +142,10 @@
       <button class="btn" id="bNext" title="Вперёд">⏭</button>
     </div>
     <div class="prow2">
-      <div class="time" id="tcur">0:00</div>
+      <div style="display:flex; align-items:center; gap:2px;">
+        <div class="time" id="tcur">0:00</div>
+        <button class="btn off" id="bDl" title="Скачать текущий трек" style="width:30px;height:30px;font-size:14px;">⤓</button>
+      </div>
       <div style="display:flex; gap:6px;">
         <button class="btn off" id="bShuffle" title="Перемешать" style="width:30px;height:30px;font-size:14px;">🔀</button>
         <button class="btn off" id="bRepeat" title="Повтор" style="width:30px;height:30px;font-size:14px;">🔁</button>
@@ -140,20 +156,19 @@
 
 <script>
 'use strict';
-// Экран «Музыка» PikoVK (1.3.23) — локальная копия идеи VK Music Player:
-// свой плеер вне страниц VK, данные через мост VkbMusic (Kotlin).
-// Очередь, шаффл, повтор — здесь; ЗВУК — в службе (нативный MediaPlayer,
-// PlaybackService): вкладка — пульт (nativePlay/nativePause/…), позицию
-// присылает служба хуком __vkbMusicPos, конец трека — хуком
-// __vkbMusicEnded. Звук не зависит от жизни этой страницы/WebView.
+// Экран «Музыка» PikoVK (1.3.23, доработка) — локальная копия идеи VK Music
+// Player: свой плеер вне страниц VK, данные через мост VkbMusic (Kotlin).
+// ОЧЕРЕДЬ ЖИВЁТ В СЛУЖБЕ (PlaybackService): страница один раз отдаёт список
+// играбельных треков и номер выбранного (nativeQueue) — дальше служба сама
+// играет, сама переходит по завершению/ошибке, сама ведёт next/prev из
+// шторки и гарнитуры. Вкладка — пульт и дисплей: nativeShift/nativeMode,
+// позицию присылает служба хуком __vkbMusicPos, смену трека — пушем
+// __vkbMusicData({kind:'player'}). Кнопки «‹ ВК» и скачивания — тоже мост.
 
 var state = {
-  section: 'my',        // my | pl | sr
+  section: 'my',        // my | pl | sr | dl
   tracks: [],           // нормализованные треки текущего списка
   playlists: [],
-  queue: [],            // очередь воспроизведения (индексы в tracks или свои объекты)
-  origQueue: null,
-  qi: -1,               // индекс в очереди
   shuffle: false,
   repeat: 'default',    // default | all | one
   lastReq: 0,
@@ -164,7 +179,8 @@ var state = {
   natPlaying: false,    // зеркало состояния службы (приходит с __vkbMusicPos)
   natHas: false,        // в службе есть трек (даже с чужой сессии вкладки)
   natPos: 0,            // последняя позиция из службы, сек
-  natDur: 0             // последняя длительность из службы, сек
+  natDur: 0,            // последняя длительность из службы, сек
+  natRawId: ''          // какой трек играет в службе (для подсветки/скачивания)
 };
 
 var searchTimer = null;
@@ -211,28 +227,42 @@ window.__vkbMusicData = function(r){
   if (r.kind==='tracks' && cb){ delete state.reqKind[r.reqId]; cb(r.ok, r.items||[], r.error||''); return; }
   if (r.kind==='playlists' && cb){ delete state.reqKind[r.reqId]; cb(r.ok, r.items||[], r.error||''); return; }
   if (r.kind==='player'){
-    // синхронизация свежей вкладки со службой (службу могли поднять из
-    // прежней сессии вкладки — карточка снизу обязана ожить)
+    // пуш состояния службы (смена трека / syncPlayer): карточка снизу
+    // оживает даже на пересобранной вкладке — очередь теперь в службе
     if (!r.has) return;
     state.natHas = true;
     state.natPlaying = !!r.playing;
     state.natPos = r.pos||0;
     state.natDur = r.dur||0;
+    state.natRawId = r.rawId || '';
     $('ptt').textContent = r.title || '—';
     $('par').textContent = r.artist || '';
+    $('pcov').style.backgroundImage = r.cover ? "url('" + r.cover + "')" : 'none';
     $('bPlay').textContent = r.playing ? '⏸' : '▶';
+    // режимы — служба источник истины (шаффл/повтор переживают вкладку)
+    if (r.shuffle !== undefined){
+      state.shuffle = !!r.shuffle;
+      $('bShuffle').className = 'btn' + (state.shuffle ? ' on' : ' off');
+    }
+    if (r.repeat !== undefined){
+      state.repeat = r.repeat || 'default';
+      $('bRepeat').className = 'btn' + (state.repeat==='default' ? ' off' : ' on');
+      $('bRepeat').textContent = state.repeat==='one' ? '🔂' : '🔁';
+    }
     var d = r.dur||0;
     if (d > 0){
       $('tdur').textContent = fmt(d);
       $('seek').value = Math.round(1000 * (r.pos||0) / d);
       $('tcur').textContent = fmt(r.pos||0);
     }
-    // подсветить строку текущего трека, если она в списке
+    // подсветить строку текущего трека, если она в списке (класс
+    // restricted восстанавливаем — иначе серые треки «вернутся» в цвет)
     if (r.rawId){
       var rows = document.querySelectorAll('#list .trk');
       for (var i=0;i<rows.length;i++){
         var on = rows[i].getAttribute('data-raw') === r.rawId;
-        rows[i].className = 'trk' + (on ? ' cur' : '');
+        rows[i].className = 'trk' + (on ? ' cur' : '')
+          + (rows[i].getAttribute('data-restricted')==='1' ? ' restricted' : '');
       }
     }
     return;
@@ -249,7 +279,7 @@ function setMsg(html){
 function trackRowHtml(t, idx){
   var restricted = t.restricted ? ' restricted' : '';
   var cov = t.cover ? ' style="background-image:url(\'' + t.cover + '\')"' : '';
-  return '<div class="trk'+restricted+'" data-i="'+idx+'" data-raw="'+esc(t.rawId)+'">'
+  return '<div class="trk'+restricted+'" data-i="'+idx+'" data-raw="'+esc(t.rawId)+'" data-restricted="'+(t.restricted?1:0)+'">'
     + '<div class="cov"'+cov+'></div>'
     + '<div class="meta"><div class="tt">'+esc(t.title)+'</div>'
     + '<div class="ar">'+esc(t.artist)+'</div></div>'
@@ -299,13 +329,13 @@ function wireRows(){
         if (dl){
           ev.stopPropagation();
           var t = state.tracks[idx];
-          if (t && t.url){
+          try{
             window.VkbMusic.download(JSON.stringify({
-              url:t.url, hls:t.hls, name:(t.artist?t.artist+' - ':'')+t.title, rawId:t.rawId
+              url:(t && t.url) ? t.url : '', hls:(t && t.hls) ? t.hls : 0,
+              name:(t && t.url) ? ((t.artist?t.artist+' - ':'')+t.title) : '',
+              rawId:(t && t.rawId) ? t.rawId : ''
             }));
-          } else {
-            window.VkbMusic.download(JSON.stringify({url:'', name:'', rawId:''}));
-          }
+          }catch(e){}
           return;
         }
         playFromList(idx);
@@ -353,6 +383,7 @@ function onTracks(ok, items, err){
 }
 
 function loadSection(append){
+  if (state.section==='dl'){ lastDlSnap = ''; renderDownloads(); return; } // снимок мгновенный
   setMsg('Загрузка…');
   if (state.section==='my'){
     ask('tracks', {offset: state.tracks.length && append ? state.tracks.length : 0, append:append}, onTracks);
@@ -373,57 +404,44 @@ function doSearch(append){
 }
 
 // ------------------------------------------------------------------
-// Очередь и воспроизведение (по образцу VK Music Player)
+// Очередь и воспроизведение: очередь живёт в СЛУЖБЕ (1.3.23 доработка).
+// Страница отдаёт список играбельных треков и номер выбранного — дальше
+// служба играет и переходит сама, даже когда вкладки уже нет.
 // ------------------------------------------------------------------
-function shuffleArr(a){
-  for (var i=a.length-1; i>0; i--){
-    var j = Math.floor(Math.random()*(i+1));
-    var x = a[i]; a[i] = a[j]; a[j] = x;
-  }
-  return a;
-}
 
-function setQueueFromList(startIdx){
-  var q = [];
-  for (var i=0; i<state.tracks.length; i++) q.push(i);
-  state.origQueue = null;
-  if (state.shuffle){
-    state.origQueue = q.slice();
-    q = shuffleArr(q.slice());
-    var pos = q.indexOf(startIdx);
-    if (pos > 0){ var x = q[pos]; q.splice(pos,1); q.unshift(x); pos = 0; }
+// Трек службы по rawId (для длительности-запаски и подсветки)
+function curTrack(){
+  for (var i=0;i<state.tracks.length;i++){
+    var t = state.tracks[i];
+    if (t && t.rawId === state.natRawId) return t;
   }
-  state.queue = q;
-  state.qi = q.indexOf(startIdx);
+  return null;
 }
 
 function playFromList(idx){
   var t = state.tracks[idx];
   if (!t || t.restricted) return;
-  setQueueFromList(idx);
-  playCurrent(0);
-}
-
-function playCurrent(seekSec){
-  var idx = state.queue[state.qi];
-  if (idx === undefined || idx < 0) return;
-  var t = state.tracks[idx];
-  if (!t || !t.url) return;
-  loadIntoAudio(t, seekSec || 0);
-  highlightRow(idx);
-  updatePlayerBar(t);
-}
-
-function loadIntoAudio(t, seekSec){
-  // звук теперь в службе (нативный MediaPlayer): отдаём трек и параметры.
-  // Ссылка уже развёрнута в Kotlin (unmask); MediaPlayer умеет и mp3,
-  // и HLS m3u8 — CORS и hls.js больше не нужны.
+  // собираем только играбельные — очередь в службе не должна натыкаться
+  // на пустые ссылки и ограничения
+  var list = [];
+  var pos = -1;
+  for (var i=0; i<state.tracks.length; i++){
+    var tr = state.tracks[i];
+    if (tr && tr.url && !tr.restricted){
+      list.push(tr);
+      if (i === idx) pos = list.length - 1;
+    }
+  }
+  if (pos < 0) return;
+  state.natRawId = t.rawId || '';
   state.natHas = true;
   state.natPlaying = true; // подтверждение придёт с __vkbMusicPos
+  highlightRow(idx);
+  updatePlayerBar(t);
   try{
-    window.VkbMusic.nativePlay(JSON.stringify({
-      url: t.url, title: t.title||'', artist: t.artist||'',
-      duration: t.duration||0, rawId: t.rawId||'', seek: seekSec||0
+    window.VkbMusic.nativeQueue(JSON.stringify({
+      tracks: list, index: pos,
+      shuffle: state.shuffle ? 1 : 0, repeat: state.repeat
     }));
   }catch(e){}
 }
@@ -433,7 +451,8 @@ function highlightRow(idx){
   var rows = document.querySelectorAll('#list .trk');
   for (var i=0; i<rows.length; i++){
     var on = rows[i].getAttribute('data-raw') === rawId;
-    rows[i].className = 'trk' + (on ? ' cur' : '');
+    rows[i].className = 'trk' + (on ? ' cur' : '')
+      + (rows[i].getAttribute('data-restricted')==='1' ? ' restricted' : '');
   }
 }
 
@@ -454,42 +473,31 @@ function togglePlay(){
     }catch(e){}
     return;
   }
-  // в службе пусто: если очередь выбрана — играем текущий, иначе первый доступный
-  if (state.qi >= 0 && state.queue.length){ playCurrent(0); return; }
+  // в службе пусто: стартуем с первого доступного трека списка —
+  // служба сразу получит и очередь, и будет переключать сама
   for (var i=0; i<state.tracks.length; i++){
     var t = state.tracks[i];
     if (t && t.url && !t.restricted){ playFromList(i); return; }
   }
 }
 
-function shift(dir){
-  if (!state.queue.length) return;
-  var n = state.qi + dir;
-  if (n >= state.queue.length){
-    if (state.repeat === 'all'){ n = 0; } else { return; }
-  }
-  if (n < 0){
-    n = state.repeat === 'all' ? state.queue.length - 1 : 0;
-  }
-  state.qi = n;
-  playCurrent(0);
-}
-
-// команды медиашторки/гарнитуры: shift — очередь здесь; пауза/плей —
-// нативно в службу. (Когда в службе есть трек, PlaybackService перехватывает
-// pause/play/toggle сам — страница видит их только при пустой службе.)
+// команды медиашторки/гарнитуры: вперёд/назад — очередь СЛУЖБЫ
+// (nativeShift), пауза/плей — тоже служба. Страница здесь только ретранслятор:
+// служба сама разруливает, что делать, даже когда вкладки нет.
 window.__vkbPlayerCmd = function(cmd){
   try{
-    if (cmd==='next'){ shift(1); return; }
-    if (cmd==='prev'){ shift(-1); return; }
+    if (cmd==='next'){ try{ window.VkbMusic.nativeShift(1); }catch(e){} return; }
+    if (cmd==='prev'){ try{ window.VkbMusic.nativeShift(-1); }catch(e){} return; }
     if (cmd==='toggle'){ togglePlay(); return; }
     if (cmd==='pause'){ try{ window.VkbMusic.nativePause(); state.natPlaying=false; }catch(e){} return; }
     if (cmd==='play' || cmd==='resume'){ togglePlay(); return; }
   }catch(e){}
 };
 
-// хуки службы: позиция каждую секунду и «трек кончился»
-window.__vkbMusicPos = function(pos, dur, playing, has){
+// хуки службы: позиция каждую секунду (с rawId — какой трек играет).
+// «Конец трека» сюда больше не приходит: очередь ведёт сама служба.
+window.__vkbMusicPos = function(pos, dur, playing, has, rawId){
+  if (rawId) state.natRawId = rawId;
   state.natHas = !!has;
   state.natPlaying = !!playing;
   state.natPos = pos||0;
@@ -497,25 +505,13 @@ window.__vkbMusicPos = function(pos, dur, playing, has){
   $('bPlay').textContent = playing ? '⏸' : '▶';
   var d = dur||0;
   if (!d){
-    var idx = state.queue[state.qi];
-    var t = state.tracks[idx];
+    var t = curTrack();
     if (t) d = t.duration||0;
   }
   if (d > 0){
     $('seek').value = Math.round(1000 * (pos||0) / d);
     $('tcur').textContent = fmt(pos||0);
   }
-};
-
-window.__vkbMusicEnded = function(){
-  // конец/ошибка трека: очередь здесь (повтор, следующий)
-  if (state.repeat === 'one'){ playCurrent(0); return; }
-  var n = state.qi + 1;
-  if (n >= state.queue.length){
-    if (state.repeat === 'all'){ n = 0; } else { $('bPlay').textContent = '▶'; return; }
-  }
-  state.qi = n;
-  playCurrent(0);
 };
 
 // ------------------------------------------------------------------
@@ -525,8 +521,7 @@ $('seek').addEventListener('input', function(){
   // длительность берём из службы (трек может быть из прошлой сессии вкладки)
   var d = state.natDur;
   if (!d){
-    var idx = state.queue[state.qi];
-    var t = state.tracks[idx];
+    var t = curTrack();
     if (t) d = t.duration||0;
   }
   if (d && d > 0){
@@ -535,37 +530,35 @@ $('seek').addEventListener('input', function(){
 });
 
 $('bPlay').addEventListener('click', togglePlay);
-$('bNext').addEventListener('click', function(){ shift(1); });
+$('bNext').addEventListener('click', function(){
+  // очередь в службе — переключает она же (работает и с пустой страницей)
+  try{ window.VkbMusic.nativeShift(1); }catch(e){}
+});
 $('bPrev').addEventListener('click', function(){
-  // как у обычных плееров: в начале трека — в начало, иначе — предыдущий
-  if (state.natPos > 3){ try{ window.VkbMusic.nativeSeek(0); }catch(e){} }
-  else { shift(-1); }
+  // «назад» в службе: в начале трека — в начало, иначе предыдущий
+  try{ window.VkbMusic.nativeShift(-1); }catch(e){}
 });
 $('bShuffle').addEventListener('click', function(){
   state.shuffle = !state.shuffle;
   $('bShuffle').className = 'btn' + (state.shuffle ? ' on' : ' off');
-  if (state.shuffle){
-    state.origQueue = state.queue.slice();
-    var q = state.queue.slice();
-    q = shuffleArr(q);
-    if (state.qi >= 0){
-      var pos = q.indexOf(state.queue[state.qi]);
-      if (pos > 0){ var x = q[pos]; q.splice(pos,1); q.unshift(x); }
-    }
-    state.queue = q;
-    state.qi = q.length ? 0 : -1;
-  } else {
-    if (state.origQueue){
-      var curRaw = state.queue[state.qi] !== undefined ? state.queue[state.qi] : -1;
-      state.queue = state.origQueue.slice();
-      state.qi = state.queue.indexOf(curRaw);
-    }
-  }
+  // порядок обходит служба — сообщаем ей режим (текущий трек останется)
+  try{ window.VkbMusic.nativeMode(state.shuffle ? 1 : 0, state.repeat); }catch(e){}
 });
 $('bRepeat').addEventListener('click', function(){
   state.repeat = state.repeat==='default' ? 'all' : (state.repeat==='all' ? 'one' : 'default');
   $('bRepeat').className = 'btn' + (state.repeat==='default' ? ' off' : ' on');
   $('bRepeat').textContent = state.repeat==='one' ? '🔂' : '🔁';
+  try{ window.VkbMusic.nativeMode(state.shuffle ? 1 : 0, state.repeat); }catch(e){}
+});
+
+// кнопка плеера: скачать тот трек, что играет сейчас
+$('bDl').addEventListener('click', function(){
+  try{ window.VkbMusic.downloadCurrent(); }catch(e){}
+});
+
+// кнопка «‹ ВК»: вернуться к вкладке браузера
+$('exitTab').addEventListener('click', function(){
+  try{ window.VkbMusic.exitTab(); }catch(e){}
 });
 
 // вкладки
@@ -610,6 +603,54 @@ $('q').addEventListener('input', function(){
     }
   }, 400);
 });
+
+// ------------------------------------------------------------------
+// Диспетчер загрузок (1.3.23 доработка): снимок из TrackDownloader,
+// опрос раз в 800 мс, отмена активных задач кнопкой ✕
+// ------------------------------------------------------------------
+var DL_ICONS = ['⏳','⬇','✅','⚠️','🚫'];
+var DL_LABELS = ['в очереди','качается','готово','ошибка','отменено'];
+
+var lastDlSnap = '';
+
+function renderDownloads(){
+  var arr = [];
+  try{ arr = JSON.parse(window.VkbMusic.getDownloads()) || []; }catch(e){ arr = []; }
+  var snap = JSON.stringify(arr);
+  if (snap === lastDlSnap) return; // ничего не изменилось — не перерисовываем
+  lastDlSnap = snap;
+  if (!arr.length){ setMsg('Скачиваний ещё не было'); return; }
+  var html = '';
+  for (var i=0;i<arr.length;i++){
+    var t = arr[i];
+    var st = t.status|0;
+    var sub = DL_LABELS[st] || '';
+    if (st === 1) sub = 'качается… ' + (t.progress|0) + '%';
+    if (st === 2 && t.file) sub = 'готово: ' + esc(t.file);
+    var bar = (st === 1) ? '<div class="dlbar"><i style="width:' + (t.progress|0) + '%"></i></div>' : '';
+    var cancel = (st === 0 || st === 1)
+      ? '<button class="dl" data-dlc="' + (t.id|0) + '" title="Отменить">✕</button>' : '';
+    html += '<div class="dlrow"><div class="dlic">' + (DL_ICONS[st]||'⏳') + '</div>'
+      + '<div class="meta"><div class="tt">' + esc(t.name) + '</div>'
+      + '<div class="ar">' + sub + '</div>' + bar + '</div>' + cancel + '</div>';
+  }
+  $('list').innerHTML = html;
+  var btns = document.querySelectorAll('#list [data-dlc]');
+  for (var k=0; k<btns.length; k++){
+    (function(el){
+      el.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        try{ window.VkbMusic.cancelDownload(parseInt(el.getAttribute('data-dlc'), 10)); }catch(e){}
+        renderDownloads();
+      });
+    })(btns[k]);
+  }
+}
+
+// опрос только когда вкладка «Загрузки» открыта — лишней работы нет
+setInterval(function(){
+  if (state.section === 'dl') renderDownloads();
+}, 800);
 
 // старт: моя музыка
 setMsg('Загрузка…');
