@@ -61,7 +61,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         }
     }
 
-    private fun sendList(kind: String, reqId: Int, ok: Boolean, items: String, append: Boolean, rawPage: Int, error: String) {
+    private fun sendList(kind: String, reqId: Int, ok: Boolean, items: String, append: Boolean, rawPage: Int, total: Int, error: String) {
         val obj = JSONObject()
         obj.put("kind", kind)
         obj.put("reqId", reqId)
@@ -73,6 +73,9 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         // треки (id==0) — если сдвигать по числу показанных, offset дрейфует
         // и VK отдаёт те же треки по кругу (дрейфующая пагинация)
         obj.put("raw", rawPage)
+        // 1.3.23 доработка-4: общее число записей по мнению VK (response.count)
+        // для счётчика «Прогружено N из M» на вкладке. 0 — VK число не сказал
+        obj.put("total", total)
         if (ok) {
             obj.put("items", JSONArray(items))
         } else {
@@ -89,6 +92,12 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         return items.length()
     }
 
+    // Общее число записей по мнению VK (response.count). 0 — не сказал
+    private fun totalCount(resp: JSONObject?): Int {
+        if (resp == null) return 0
+        return resp.optInt("count", 0)
+    }
+
     private fun normalizeResp(resp: JSONObject?): String {
         if (resp == null) return "[]"
         val items = resp.optJSONArray("items")
@@ -101,7 +110,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         Thread {
             val resp = MusicApi.myMusic(offset)
             val ok = resp != null
-            sendList("tracks", reqId, ok, normalizeResp(resp), append != 0, rawCount(resp),
+            sendList("tracks", reqId, ok, normalizeResp(resp), append != 0, rawCount(resp), totalCount(resp),
                 if (ok) "" else "Не удалось загрузить (нет сессии VK или сеть недоступна)")
         }.start()
     }
@@ -111,7 +120,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
         Thread {
             val resp = MusicApi.search(query, offset)
             val ok = resp != null
-            sendList("tracks", reqId, ok, normalizeResp(resp), append != 0, rawCount(resp),
+            sendList("tracks", reqId, ok, normalizeResp(resp), append != 0, rawCount(resp), totalCount(resp),
                 if (ok) "" else "Поиск не удался")
         }.start()
     }
@@ -125,7 +134,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
                 val arr = resp.optJSONArray("items")
                 if (arr != null) list = arr.toString()
             }
-            sendList("playlists", reqId, resp != null, list, append != 0, rawCount(resp),
+            sendList("playlists", reqId, resp != null, list, append != 0, rawCount(resp), totalCount(resp),
                 if (resp != null) "" else "Не удалось загрузить плейлисты")
         }.start()
     }
@@ -136,6 +145,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
             var ok = false
             var list = "[]"
             var raw = 0
+            var total = 0
             var err = "Неверные данные плейлиста"
             try {
                 val p = JSONObject(payload)
@@ -152,6 +162,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
                         ok = true
                         err = ""
                         raw = rawCount(resp)
+                        total = totalCount(resp)
                         list = normalizeResp(resp)
                     } else {
                         err = "Не удалось загрузить треки плейлиста"
@@ -159,7 +170,7 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
                 }
             } catch (_: Exception) {
             }
-            sendList("tracks", reqId, ok, list, append != 0, raw, err)
+            sendList("tracks", reqId, ok, list, append != 0, raw, total, err)
         }.start()
     }
 
