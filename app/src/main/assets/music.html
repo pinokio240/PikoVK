@@ -69,13 +69,6 @@
   .eq{display:inline-flex; align-items:flex-end; gap:2px; height:14px; width:14px; flex:none;}
   .eq i{width:3px; background:var(--acc); animation:pulse 1s infinite ease-in-out;}
   .eq i:nth-child(2){animation-delay:.25s;} .eq i:nth-child(3){animation-delay:.5s;}
-  /* 1.3.23 доработка-5: «⤓» и «⌖» в плеере — крупные овальные и справа
-     рядом с режимами (репорт владельца: мелкие и слева) */
-  #bDl,#bGo{width:46px; height:32px; border-radius:16px; font-size:17px;
-    color:var(--acc); border:1px solid var(--acc2);}
-  /* номер трека — одной строкой с обрезкой, чтобы на узких экранах
-     и при системном увеличении шрифта не выталкивал tdur за край */
-  #pno{max-width:64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   /* кнопка отмены во вкладке «Загрузки» — та же овальная форма,
      но без сдвига к краю строки */
   .dlrow .dl{margin-right:0;}
@@ -102,26 +95,37 @@
     border-radius:15px; padding:6px 12px; font-size:13px; cursor:pointer;
   }
   .exit:active{background:var(--acc2); color:#fff;}
-  /* Низ: плеер */
-  #player{border-top:1px solid var(--line); background:var(--bg2); padding:8px 12px 10px;}
-  #seek{width:100%; height:4px; -webkit-appearance:none; background:var(--bg3); border-radius:2px; outline:none; margin:2px 0 8px;}
-  #seek::-webkit-slider-thumb{-webkit-appearance:none; width:14px; height:14px; border-radius:7px; background:var(--acc);}
+  /* Низ: плеер (репорт владельца) — строка 1: обложка+названия и номер
+     трека справа; строка 2: ползунок с таймерами по краям; строка 3:
+     кнопки по центру, единая система форм/цветов из --acc/--acc2 */
+  #player{border-top:1px solid var(--line); background:var(--bg2); padding:8px 10px 12px;}
   .prow{display:flex; align-items:center; gap:10px;}
-  .pcov{width:42px; height:42px; border-radius:6px; background:var(--bg3); flex:none;
+  .pcov{width:48px; height:48px; border-radius:8px; background:var(--bg3); flex:none;
     background-size:cover; background-position:center;}
   .pmeta{flex:1; min-width:0;}
   .ptt{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600; font-size:13px;}
   .par{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--tx2); font-size:11.5px;}
+  /* номер трека справа в первой строке — одной строкой с обрезкой,
+     чтобы на узких экранах не выталкивал мета за край (цвет/шрифт — от .time) */
+  #pno{max-width:64px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:none;}
+  /* строка 2: таймеры по краям ползунка */
+  .srow{display:flex; align-items:center; gap:8px; margin-top:8px;}
+  #seek{flex:1; height:4px; -webkit-appearance:none; background:var(--bg3); border-radius:2px; outline:none; margin:0;}
+  #seek::-webkit-slider-thumb{-webkit-appearance:none; width:14px; height:14px; border-radius:7px; background:var(--acc);}
+  .time{color:var(--tx2); font-size:11px; font-variant-numeric:tabular-nums;}
+  /* строка 3: единая система кнопок — овальные pill (рамка --acc2,
+     иконка --acc), big для навигации, main #bPlay залит --acc2 и самый
+     крупный; off — только пониженная opacity, цвет не меняется */
+  .pbtns{display:flex; align-items:center; justify-content:center; gap:6px; margin-top:8px; flex-wrap:wrap;}
   .btn{
-    width:38px; height:38px; border-radius:19px; border:none; flex:none;
-    background:transparent; color:var(--tx); font-size:17px; cursor:pointer;
+    flex:none; border:none; background:transparent; color:var(--acc); cursor:pointer;
     display:flex; align-items:center; justify-content:center;
   }
-  .btn.main{background:var(--acc2); color:#fff; font-size:18px;}
-  .btn.off{color:var(--tx2); opacity:.5;}
-  .btn.on{color:var(--acc);}
-  .prow2{display:flex; align-items:center; justify-content:space-between; margin-top:2px;}
-  .time{color:var(--tx2); font-size:11px; font-variant-numeric:tabular-nums;}
+  .btn.pill{width:40px; height:34px; border-radius:17px; border:1px solid var(--acc2); font-size:15px;}
+  .btn.big{width:44px; height:44px; border-radius:22px; font-size:19px;}
+  .btn.main{width:54px; height:54px; border-radius:27px; background:var(--acc2); color:#fff; font-size:24px;}
+  .btn.off{opacity:.45;}
   /* вкладка «Загрузки» (1.3.23 доработка) */
   .dlrow{display:flex; align-items:center; gap:10px; padding:8px 12px;}
   .dlic{width:30px; height:30px; flex:none; display:flex; align-items:center; justify-content:center; font-size:16px;}
@@ -154,29 +158,24 @@
   <div id="toast"></div>
 
   <div id="player">
-    <input id="seek" type="range" min="0" max="1000" value="0">
     <div class="prow">
       <div class="pcov" id="pcov"></div>
-      <div class="pmeta">
-        <div class="ptt" id="ptt">—</div>
-        <div class="par" id="par"></div>
-      </div>
-      <button class="btn" id="bPrev" title="Назад">⏮</button>
-      <button class="btn main" id="bPlay" title="Играть/пауза">▶</button>
-      <button class="btn" id="bNext" title="Вперёд">⏭</button>
+      <div class="pmeta"><div class="ptt" id="ptt">—</div><div class="par" id="par"></div></div>
+      <div class="time" id="pno" title="Номер в списке"></div>
     </div>
-    <div class="prow2">
-      <div style="display:flex; align-items:center; gap:8px; min-width:0;">
-        <div class="time" id="pno" title="Номер в списке"></div>
-        <div class="time" id="tcur">0:00</div>
-      </div>
-      <div style="display:flex; align-items:center; gap:6px;">
-        <button class="btn" id="bDl" title="Скачать текущий трек">⤓</button>
-        <button class="btn" id="bGo" title="К играющему треку">⌖</button>
-        <button class="btn off" id="bShuffle" title="Перемешать" style="width:30px;height:30px;font-size:14px;">🔀</button>
-        <button class="btn off" id="bRepeat" title="Повтор" style="width:30px;height:30px;font-size:14px;">🔁</button>
-        <div class="time" id="tdur">0:00</div>
-      </div>
+    <div class="srow">
+      <div class="time" id="tcur">0:00</div>
+      <input id="seek" type="range" min="0" max="1000" value="0">
+      <div class="time" id="tdur">0:00</div>
+    </div>
+    <div class="pbtns">
+      <button class="btn pill" id="bDl" title="Скачать текущий трек">⤓</button>
+      <button class="btn pill" id="bGo" title="К играющему треку">⌖</button>
+      <button class="btn big" id="bPrev" title="Назад">⏮</button>
+      <button class="btn main" id="bPlay" title="Играть/пауза">▶</button>
+      <button class="btn big" id="bNext" title="Вперёд">⏭</button>
+      <button class="btn pill off" id="bRepeat" title="Повтор">🔁</button>
+      <button class="btn pill off" id="bShuffle" title="Перемешать">🔀</button>
     </div>
   </div>
 
@@ -281,11 +280,11 @@ window.__vkbMusicData = function(r){
     // режимы — служба источник истины (шаффл/повтор переживают вкладку)
     if (r.shuffle !== undefined){
       state.shuffle = !!r.shuffle;
-      $('bShuffle').className = 'btn' + (state.shuffle ? ' on' : ' off');
+      $('bShuffle').className = 'btn pill' + (state.shuffle ? ' on' : ' off');
     }
     if (r.repeat !== undefined){
       state.repeat = r.repeat || 'default';
-      $('bRepeat').className = 'btn' + (state.repeat==='default' ? ' off' : ' on');
+      $('bRepeat').className = 'btn pill' + (state.repeat==='default' ? ' off' : ' on');
       $('bRepeat').textContent = state.repeat==='one' ? '🔂' : '🔁';
     }
     var d = r.dur||0;
@@ -971,13 +970,13 @@ $('bPrev').addEventListener('click', function(){
 $('bGo').addEventListener('click', scrollToCur);
 $('bShuffle').addEventListener('click', function(){
   state.shuffle = !state.shuffle;
-  $('bShuffle').className = 'btn' + (state.shuffle ? ' on' : ' off');
+  $('bShuffle').className = 'btn pill' + (state.shuffle ? ' on' : ' off');
   // порядок обходит служба — сообщаем ей режим (текущий трек останется)
   try{ window.VkbMusic.nativeMode(state.shuffle ? 1 : 0, state.repeat); }catch(e){}
 });
 $('bRepeat').addEventListener('click', function(){
   state.repeat = state.repeat==='default' ? 'all' : (state.repeat==='all' ? 'one' : 'default');
-  $('bRepeat').className = 'btn' + (state.repeat==='default' ? ' off' : ' on');
+  $('bRepeat').className = 'btn pill' + (state.repeat==='default' ? ' off' : ' on');
   $('bRepeat').textContent = state.repeat==='one' ? '🔂' : '🔁';
   try{ window.VkbMusic.nativeMode(state.shuffle ? 1 : 0, state.repeat); }catch(e){}
 });
