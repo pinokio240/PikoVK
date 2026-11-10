@@ -204,7 +204,9 @@ var state = {
   lastReq: 0,
   reqId: 0,
   reqKind: {},
-  probing: {},
+  reqAt: {},           // время отправки запроса (сторож зависших)
+  probing: {},         // пробы битрейта в полёте/готовы (rawId -> 1)
+  probeFails: {},      // неудачные пробы битрейта (rawId -> счётчик, кап 2)
   // 1.3.23 доработка-3: кэш битрейтов по rawId — раньше ответ probe жил
   // только в DOM и пропадал при перерисовке списка (репорт владельца:
   // «качество аудио пропадает из списка»)
@@ -250,6 +252,7 @@ var IC = {
 function ask(kind, extra, cb){
   var id = ++state.reqId;
   state.reqKind[id] = cb;
+  state.reqAt[id] = Date.now();
   var p = extra || {};
   p.reqId = id;
   try{
@@ -262,6 +265,7 @@ function ask(kind, extra, cb){
     // мост недоступен — колбэк всё равно должен прийти, иначе busy
     // пагинации зависнет навсегда (fail-open)
     delete state.reqKind[id];
+    delete state.reqAt[id];
     if (cb) cb(false, [], 'Мост недоступен', 0);
   }
 }
@@ -271,15 +275,22 @@ window.__vkbMusicData = function(r){
   var cb = state.reqKind[r.reqId];
   if (r.kind==='bitrate'){
     delete state.reqKind[r.reqId];
+    delete state.reqAt[r.reqId];
     // кэшируем: перерисовка списка (переход разделов, назад, пагинация)
     // не должна терять уже узнанное качество
     if (r.kbps) state.br[r.rawId] = r.kbps;
+    else if (r.kbps === 0){
+      // неудача пробы: снимаем флаг — строка перепробуется при следующем
+      // показе, но не более 2 раз за сессию (против вечных проб мёртвых ссылок)
+      delete state.probing[r.rawId];
+      state.probeFails[r.rawId] = (state.probeFails[r.rawId] || 0) + 1;
+    }
     var el = document.querySelector('[data-raw="'+r.rawId+'"] .br');
     if (el && r.kbps){ el.textContent = (r.kbps<=200?'~'+r.kbps:r.kbps)+'k'; }
     return;
   }
-  if (r.kind==='tracks' && cb){ delete state.reqKind[r.reqId]; cb(r.ok, r.items||[], r.error||'', r.raw|0, r.total|0); return; }
-  if (r.kind==='playlists' && cb){ delete state.reqKind[r.reqId]; cb(r.ok, r.items||[], r.error||'', r.raw|0, r.total|0); return; }
+  if (r.kind==='tracks' && cb){ delete state.reqKind[r.reqId]; delete state.reqAt[r.reqId]; cb(r.ok, r.items||[], r.error||'', r.raw|0, r.total|0); return; }
+  if (r.kind==='playlists' && cb){ delete state.reqKind[r.reqId]; delete state.reqAt[r.reqId]; cb(r.ok, r.items||[], r.error||'', r.raw|0, r.total|0); return; }
   if (r.kind==='player'){
     // пуш состояния службы (смена трека / syncPlayer): карточка снизу
     // оживает даже на пересобранной вкладке — очередь теперь в службе
@@ -356,10 +367,10 @@ function trackRowHtml(t, idx){
 // в полёте» (защита от дублей при медленной сети — раньше таймер 1.5 с
 // снимал блокировку вслепую, и дважды уходил запрос с тем же offset).
 var pg = {
-  my:   { off: 0, more: true, busy: false, dups: 0 },
+  my:   { off: 0, more: true, busy: false, dups: 0, bg: 1 },
   sr:   { off: 0, more: true, busy: false, dups: 0 },
   pl:   { off: 0, more: true, busy: false, dups: 0 },
-  pltr: { off: 0, more: true, busy: false, dups: 0 }
+  pltr: { off: 0, more: true, busy: false, dups: 0, bg: 1 }
 };
 
 // «Штамп» текущего вида: растёт при каждой смене раздела/открытии плейлиста/
@@ -368,7 +379,88 @@ var pg = {
 // старого раздела перерисует текущий вид)
 state.view = 0;
 
-function resetPg(p){ p.off = 0; p.more = true; p.busy = false; p.dups = 0; p.total = 0; }
+function clearPgTimers(p){
+  if (p.timer) clearTimeout(p.timer);
+  if (p.retryTimer) clearTimeout(p.retryTimer);
+  if (p.parkTimer) clearTimeout(p.parkTimer);
+  p.timer = null; p.retryTimer = null; p.parkTimer = null;
+}
+function resetPg(p){
+  clearPgTimers(p);
+  p.off = 0; p.more = true; p.busy = false; p.dups = 0; p.total = 0;
+  p.fails = 0; p.hops = 0; p.parkMs = 0;
+}
+
+// 1.3.23 доработка-8 — порт фонового пейджера PinoK (#AUDIO-BG-PAGER).
+// Список «Моя музыка» (и треки открытого плейлиста) догружается САМ,
+// страница за страницей с паузами, пока сервер не скажет «конец», — без
+// привязки к скроллу (репорт владельца: «пагинация должна работать как
+// в PinoK»). Скролл к дну/незаполненный экран только «пинает» (kick —
+// ожидаемая пауза сокращается). Конец списка НЕ смертелен (парковка с
+// перепроверкой хвоста), сбой страницы — ретрай с бэкоффом, дыра листинга
+// — прыжок +1. Константы — как в PinoK: PAUSE_BETWEEN_PAGES_MS=1500,
+// MAX_DUP_PAGES_IN_ROW=20, MAX_HOLE_HOPS_IN_ROW=25, PARK_RECHECK 10с→5мин,
+// бэкофф ретраев 3с/6с/12с с капом 60с
+var BG_PAUSE_MS = 1500;
+var HOP_PAUSE_MS = 400;
+var RETRY_BASE_MS = 3000;
+var RETRY_MAX_MS = 60000;
+var MAX_DUPS_BG = 20;
+var MAX_HOPS = 25;
+var PARK_BASE_MS = 10000;
+var PARK_MAX_MS = 300000;
+var REQ_TIMEOUT_MS = 25000;
+
+// Живёт ли блок пагинации в текущем виде: фоновая цепочка гоняет только
+// СВОЙ список (иначе страницы «моей музыки» попали бы в выдачу поиска)
+function pgLive(p){
+  if (state.openedPl) return p === pg.pltr;
+  if (state.section === 'my') return p === pg.my;
+  if (state.section === 'sr') return p === pg.sr;
+  if (state.section === 'pl') return p === pg.pl;
+  return false;
+}
+// Очередной фоновый шаг: одна страница. Скрытая вкладка / запрос в полёте —
+// шаг откладывается, цепочку продолжит этот же таймер
+function bgNext(p){
+  if (!pgLive(p)) return;
+  if (document.hidden){ scheduleBg(p, 2000); return; }
+  if (p.busy){ scheduleBg(p, 600); return; }
+  loadMore();
+}
+function scheduleBg(p, ms){
+  if (p.timer) clearTimeout(p.timer);
+  p.timer = setTimeout(function(){ p.timer = null; bgNext(p); }, ms);
+}
+// Ретрай после сбоя страницы: бэкофф 3с → 6с → 12с → … кап 60с. Это НЕ
+// «конец списка» — раньше сбой середины навсегда останавливал пагинацию
+function scheduleRetry(p){
+  p.fails = (p.fails || 0) + 1;
+  var wait = Math.min(RETRY_BASE_MS * Math.pow(2, p.fails - 1), RETRY_MAX_MS);
+  setFoot('note', 'Ошибка загрузки — повторяю попытки…');
+  // гасим poll-таймер bgNext: иначе он выстрелит раньше бэкоффа
+  if (p.timer) clearTimeout(p.timer);
+  p.timer = null;
+  if (p.retryTimer) clearTimeout(p.retryTimer);
+  p.retryTimer = setTimeout(function(){ p.retryTimer = null; bgNext(p); }, wait);
+}
+// Парковка «конца списка» (PinoK): хвост периодически перепроверяется —
+// подхватятся новые треки, самолечение сбоя; интервал ×2 от 10с до капа
+// 5 мин (на честом конце это один дешёвый запрос в 10с…5мин, не спам)
+function park(p){
+  p.more = false;
+  if (!pgLive(p)) return; // раздел покинут: перезагрузится через loadSection
+  if (p.parkTimer) clearTimeout(p.parkTimer);
+  p.parkMs = Math.min(p.parkMs ? p.parkMs * 2 : PARK_BASE_MS, PARK_MAX_MS);
+  p.parkTimer = setTimeout(function(){
+    p.parkTimer = null;
+    if (!pgLive(p) || p.busy) return;
+    // тихая перепроверка (PinoK: не поднимать «Загрузка…» в футере):
+    // непустая страница оживит цепочку, пустая — конец снова
+    p.more = true;
+    loadMore(true);
+  }, p.parkMs);
+}
 
 // Счётчик «прогружено» — над списком. VK отдаёт общее число не для всех
 // списков (и врёт в count при дозагрузке), поэтому «из M» рисуем только
@@ -486,6 +578,9 @@ function setFoot(mode, err, endLabel){
   div.id = 'moreFoot';
   if (mode === 'busy'){
     div.innerHTML = '<div class="msg" style="padding:14px;">Загрузка…</div>';
+  } else if (mode === 'note'){
+    // авто-ретрай фонового списка: текст без кнопки — повтор сам
+    div.innerHTML = '<div class="msg" style="padding:14px;">' + esc(err || 'Загрузка…') + '</div>';
   } else if (mode === 'end'){
     div.innerHTML = '<div class="msg" style="padding:14px;">' + esc(endLabel || 'Это все треки') + '</div>';
   } else {
@@ -502,14 +597,16 @@ function setFoot(mode, err, endLabel){
 
 // Дозагрузка следующей страницы ТЕКУЩЕГО списка. Все блокировки — здесь:
 // нет «ещё» или запрос уже летит — тихо выходим
-function loadMore(){
+// quiet — тихий запрос парковки: футер «Загрузка…» не показываем (PinoK:
+// перепроверка хвоста не должна мигать в UI)
+function loadMore(quiet){
   if (state.section === 'dl') return;
   var p = pg.pltr;
   if (state.openedPl){
     if (!p.more || p.busy) return;
     p.busy = true;
     p.stamp = state.view;
-    setFoot('busy');
+    if (!quiet) setFoot('busy');
     var o = state.openedPl;
     ask('pltracks', {owner:o.owner, id:o.id, key:o.key, offset:p.off, append:1},
       function(ok, items, err, raw, total){ onTracks(p, ok, items, err, raw, 'Плейлист пуст', total); });
@@ -520,7 +617,7 @@ function loadMore(){
     if (!p.more || p.busy) return;
     p.busy = true;
     p.stamp = state.view;
-    setFoot('busy');
+    if (!quiet) setFoot('busy');
     ask('tracks', {offset:p.off, append:1},
       function(ok, items, err, raw, total){ onTracks(p, ok, items, err, raw, 'Список пуст', total); });
   } else if (state.section === 'sr'){
@@ -530,7 +627,7 @@ function loadMore(){
     if (!q) return;
     p.busy = true;
     p.stamp = state.view;
-    setFoot('busy');
+    if (!quiet) setFoot('busy');
     ask('search', {q:q, offset:p.off, append:1},
       function(ok, items, err, raw, total){ onTracks(p, ok, items, err, raw, 'Ничего не найдено', total); });
   } else if (state.section === 'pl'){
@@ -538,7 +635,7 @@ function loadMore(){
     if (!p.more || p.busy) return;
     p.busy = true;
     p.stamp = state.view;
-    setFoot('busy');
+    if (!quiet) setFoot('busy');
     ask('playlists', {offset:p.off, append:1},
       function(ok, items, err, raw, total){ onPlaylists(p, ok, items, err, raw, total); });
   }
@@ -555,21 +652,59 @@ function onTracks(p, ok, items, err, raw, emptyMsg, total){
   p.busy = false;
   if (total > 0) p.total = total; // общее число от VK (не всегда приходит)
   if (!ok){
-    if (p.off === 0) showErrorRetry(err || 'Не удалось загрузить');
-    else setFoot('err', err || 'Не удалось загрузить ещё страницу');
+    if (p.off === 0){
+      showErrorRetry(err || 'Не удалось загрузить');
+      // фоновому списку кнопку дублирует авто-ретрай (как в PinoK):
+      // повтор придёт сам, ручная кнопка остаётся на случай нетерпения
+      if (p.bg) scheduleRetry(p);
+    } else if (p.bg){
+      // сбой СЕРЕДИНЫ списка — НЕ конец (PinoK: пустой/сбойный ответ при
+      // гейте/сети навсегда убивал пагинацию): ретрай с бэкоффом
+      scheduleRetry(p);
+    } else {
+      setFoot('err', err || 'Не удалось загрузить ещё страницу');
+    }
     updateCnt();
     return;
   }
+  p.fails = 0; // страница прошла — бэкофф сброшен
   var wasFresh = (p.off === 0);
   if (raw <= 0){
-    // пустая СЫРАЯ страница — честный конец списка (паттерн PinoK:
-    // hasMore считается по сырой странице, а не по total — VK врёт в count)
+    // пустая СЫРАЯ страница — ТРИ разных ситуации (PinoK #AUDIO-PAGING-HOLE,
+    // прецедент стопа 149/3239): VK режет листинг на «битой» записи, и окно,
+    // начинающееся с неё, приходит пустым. offset < total → прыжок +1 через
+    // дыру; иначе честный конец списка
+    if (p.bg && p.hops < MAX_HOPS && (p.total|0) > 0 && p.off < (p.total|0)){
+      p.hops++;
+      p.off++;
+      setFoot('busy');
+      scheduleBg(p, HOP_PAUSE_MS);
+      updateCnt();
+      return;
+    }
+    // ok=true, пусто и без count (PinoK: маркер ситуативного сбоя, не конец)
+    // при off>0 — ретрай с бэкоффом; после 5 неудач признаём конец
+    if (p.bg && p.off > 0 && (p.total|0) <= 0 && (p.fails || 0) < 5){
+      scheduleRetry(p);
+      updateCnt();
+      return;
+    }
+    p.hops = 0;
     p.more = false;
-    if (state.tracks.length) setFoot('end');
-    else setMsg(emptyMsg || 'Список пуст');
+    if (state.tracks.length){
+      setFoot('end');
+      if (p.bg) park(p); // конец не навсегда: хвост перепроверяется (PinoK)
+    } else {
+      setMsg(emptyMsg || 'Список пуст');
+      // пустая библиотека тоже паркуется (PinoK): добавленные с другого
+      // устройства треки подтянутся сами, без перезахода в раздел
+      if (p.bg) park(p);
+    }
     updateCnt();
     return;
   }
+  p.hops = 0;
+  p.parkMs = 0; // страница прошла — интервал парковки снова с базы
   p.off += raw;
   // дедуп по rawId (в PinoK — ключ ownerId_id): VK иногда отдаёт
   // перекрывающиеся окна, а дубли в списке = «пагинация сломана»
@@ -588,27 +723,40 @@ function onTracks(p, ok, items, err, raw, emptyMsg, total){
   }
   if (!fresh.length){
     // страница целиком из дубликатов: после N таких подряд признаём конец
-    // списка (паттерн PinoK — защита от листания одного окна по кругу)
+    // списка (паттерн PinoK — защита от листания одного окна по кругу;
+    // для фонового списка кап как в PinoK — 20 страниц подряд)
     p.dups++;
-    if (p.dups >= 3) p.more = false;
+    if (p.dups >= (p.bg ? MAX_DUPS_BG : 3)) p.more = false;
   } else {
     p.dups = 0;
   }
   var from = state.tracks.length;
   for (i=0;i<fresh.length;i++) state.tracks.push(fresh[i]);
-  if (wasFresh){
+  // Прыжок через дыру на ПЕРВОЙ странице (находка ревью): renderTracksFresh
+  // для этого вида ещё не звался, в #list висит setMsg «Загрузка…» — append
+  // влепил бы строки ПОД надпись. Если строк в DOM ещё нет — рисуем как
+  // свежий список (находит renderTracksAppend сам)
+  if (wasFresh || !document.querySelector('#list .trk')){
     if (!state.tracks.length){ setMsg(emptyMsg || 'Список пуст'); updateCnt(); return; }
     renderTracksFresh();
   } else if (fresh.length){
     renderTracksAppend(from);
   }
-  if (!p.more) setFoot('end');
-  else removeFoot();
+  if (!p.more){
+    setFoot('end');
+    if (p.bg) park(p);
+  } else {
+    removeFoot();
+  }
   updateCnt();
-  // пришли новые строки — если пользователь всё ещё у дна (или экран так
-  // и не заполнен), сразу тянем следующую страницу: подгрузка идёт сама,
-  // без дёрганья скролла (репорт владельца про автоподгрузку пагинации)
-  if (p.more) setTimeout(autoLoad, 250);
+  // Пагинация живёт сама (репорт владельца «как в PinoK»): фоновые списки
+  // (моя музыка, треки открытого плейлиста) тянут следующую страницу через
+  // паузу БЕЗ привязки к скроллу — библиотека грузится целиком; поиск и
+  // плейлисты — как раньше: цепочка только до заполнения экрана
+  if (p.more){
+    if (p.bg) scheduleBg(p, BG_PAUSE_MS);
+    else setTimeout(autoLoad, 250);
+  }
 }
 
 // Приём страницы плейлистов (та же механика, отдельный блок pg.pl)
@@ -723,7 +871,7 @@ function renderTracksFresh(){
   if (!state.tracks.length){ setMsg('Список пуст'); return; }
   $('list').innerHTML = html;
   refreshCur();
-  probeRange(0);
+  probeVisible();
 }
 
 // Дозагрузка: новые строки ПРИБАВЛЯЮТСЯ в конец DOM (как в полной версии
@@ -738,19 +886,37 @@ function renderTracksAppend(from){
   removeFoot();
   $('list').insertAdjacentHTML('beforeend', html);
   refreshCur();
-  probeRange(from);
+  probeVisible();
 }
 
 // Проба битрейта (лениво, как в расширении; кэш в Kotlin делает повторные
-// пробы дешёвыми) — только для диапазона [from..конец)
-function probeRange(from){
-  for (var j=from; j<state.tracks.length; j++){
-    var tr = state.tracks[j];
-    if (tr && tr.url && !state.probing[tr.rawId] && !tr.restricted){
-      state.probing[tr.rawId] = 1;
-      ask('probe', {rawId:tr.rawId, url:tr.url, hls:tr.hls, duration:tr.duration});
+// пробы дешёвыми). 1.3.23 доработка-8: окно ВИДИМОСТИ вместо «всё, что
+// добавлено» — фоновая пагинация добавляет тысячи строк, а проба HLS
+// качает до мегабайта на трек: вся библиотека = гигабайты впустую.
+// Пробуем только строки у экрана (+запас 5/15 строк), бюджет 10 за раз;
+// при скролле окно пересчитывается, бейдж появляется у строк на экране
+var probeTimer = null;
+function probeVisible(){
+  if (probeTimer) return;
+  probeTimer = setTimeout(function(){
+    probeTimer = null;
+    if (!state.tracks.length) return;
+    var el = $('list');
+    var rh = 64;
+    var row0 = document.querySelector('#list .trk');
+    if (row0 && row0.offsetHeight > 10) rh = row0.offsetHeight;
+    var top = Math.max(0, Math.floor(el.scrollTop / rh) - 5);
+    var bot = Math.min(state.tracks.length, Math.ceil((el.scrollTop + el.clientHeight) / rh) + 15);
+    var budget = 10;
+    for (var j = top; j < bot && budget > 0; j++){
+      var tr = state.tracks[j];
+      if (tr && tr.url && !tr.restricted && !state.probing[tr.rawId] && !(state.probeFails[tr.rawId] >= 2)){
+        state.probing[tr.rawId] = 1;
+        budget--;
+        ask('probe', {rawId:tr.rawId, url:tr.url, hls:tr.hls, duration:tr.duration});
+      }
     }
-  }
+  }, 250);
 }
 
 function plRowHtml(p, i){
@@ -1146,13 +1312,34 @@ setInterval(function(){
   if (!state.chase || state.chase.rawId !== state.natRawId){
     state.chase = { rawId: state.natRawId, left: 10 };
   }
-  if (state.chase.left <= 0) return;
-  state.chase.left--;
   var p = pg.my;
   if (state.openedPl) p = pg.pltr;
-  if (!p.more || p.busy) return; // конец списка или запрос уже летит
+  // проверка ДО декремента (находка ревью): припаркованный конец/полёт —
+  // штатные состояния, бюджет не должен сгорать в тики «в пустоту»
+  if (!p.more || p.busy) return;
+  if (state.chase.left <= 0) return;
+  state.chase.left--;
   loadMore();
 }, 1200);
+
+// Сторож зависших запросов (fail-open): ответ потерялся (сеть/WebView уснул
+// посреди запроса) — busy пагинации висел бы вечно и список замер. Через
+// REQ_TIMEOUT_MS считаем запрос сбойным и отдаём колбэку отказ: фоновые
+// списки уходят в ретрай с бэкоффом, у остальных — кнопка «Повторить»
+setInterval(function(){
+  var now = Date.now();
+  for (var id in state.reqKind){
+    if (!state.reqKind.hasOwnProperty(id)) continue;
+    var at = state.reqAt[id] || 0;
+    if (!at || now - at < REQ_TIMEOUT_MS) continue;
+    var cb = state.reqKind[id];
+    delete state.reqKind[id];
+    delete state.reqAt[id];
+    if (cb){
+      try{ cb(false, [], 'Таймаут загрузки', 0, 0); }catch(e){}
+    }
+  }
+}, 5000);
 
 // старт: моя музыка (loadSection сам сбрасывает пагинацию и вешает футер)
 loadSection();
@@ -1161,19 +1348,35 @@ loadSection();
 // забираем её состояние — карточка снизу оживает
 try{ if (window.VkbMusic && window.VkbMusic.syncPlayer) window.VkbMusic.syncPlayer(); }catch(e){}
 
-// бесконечный скролл: у дна (запас 500 px) дозагружаем следующую страницу
-// текущего списка; короткий список докачиваем, пока не заполнит экран —
-// иначе на большом телефоне крутить нечего и автоподгрузка не видна.
-// Всю защиту от повторных запросов и дублей делает loadMore (busy/more),
-// а цепочку страниц после каждого ответа продолжает autoLoad
+// Бесконечный скролл по паттерну PinoK: фоновые списки (моя музыка, треки
+// плейлиста) грузятся сами цепочкой страниц (BG_PAUSE_MS между страницами);
+// скролл к дну/незаполненный экран только «пинает» — пауза сокращается.
+// Поиск и плейлисты — классическая догрузка: у дна (запас 500 px) следующая
+// страница, короткий список докачивается до заполнения экрана. Защиту от
+// повторов и дублей делает loadMore (busy/more/stamp/дедуп)
 function autoLoad(){
   if (state.section === 'dl') return;
   if (!state.openedPl && state.section !== 'my' && state.section !== 'sr' && state.section !== 'pl') return;
+  var p = pg.my;
+  if (state.openedPl) p = pg.pltr;
+  else if (state.section === 'sr') p = pg.sr;
+  else if (state.section === 'pl') p = pg.pl;
   var el = $('list');
+  // фоновые списки: скролл к дну / незаполненный экран — «kick» (PinoK):
+  // ожидаемая фоном пауза/бэкофф отменяется, страница берётся немедленно.
+  // У припаркованного конца (p.more=false) kick молчит — таймер перепроверки
+  // хвоста не убивается
+  if (p.bg){
+    if (el.scrollHeight <= el.clientHeight + 80 || el.scrollTop + el.clientHeight >= el.scrollHeight - 500){
+      if (p.more){ clearPgTimers(p); loadMore(); }
+    }
+    return;
+  }
   if (el.scrollHeight <= el.clientHeight + 80){ loadMore(); return; }
   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 500) loadMore();
 }
 $('list').addEventListener('scroll', autoLoad);
+$('list').addEventListener('scroll', probeVisible);
 
 // Делегированные клики списка: один слушатель на контейнер — переживает
 // любые перерисовки строк (раньше слушатели вешались на строки и

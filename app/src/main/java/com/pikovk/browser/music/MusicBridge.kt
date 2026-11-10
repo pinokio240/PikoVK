@@ -179,12 +179,15 @@ class MusicBridge(private val context: Context, private val webHolder: () -> Web
     fun probe(rawId: String, url: String, hls: Int, duration: Long, reqId: Int) {
         Thread {
             val kbps = MusicApi.probeBitrate(rawId, url, hls != 0, duration)
-            if (kbps == null) return@Thread
+            // 1.3.23 доработка-8: неудача ТОЖЕ отвечает (kbps=0) — страница
+            // снимет флаг пробы и повторит позже (не более 2 раз за сессию),
+            // раньше молчание навсегда оставляло трек без бейджа качества
+            val k: Int = if (kbps == null) 0 else kbps
             val obj = JSONObject()
             obj.put("kind", "bitrate")
             obj.put("reqId", reqId)
             obj.put("rawId", rawId)
-            obj.put("kbps", kbps)
+            obj.put("kbps", k)
             respond(webHolder(), obj.toString())
         }.start()
     }
