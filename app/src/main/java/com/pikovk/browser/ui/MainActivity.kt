@@ -7,20 +7,27 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Message
 import android.util.Log
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -70,6 +77,15 @@ class MainActivity : AppCompatActivity() {
     // сначала гасит полный экран, а пересборка WebView невозможна.
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+
+    // 1.3.23: окно-попап (VK «Поделиться» открывает share.php через
+    // window.open, OAuth и часть диалогов — target=_blank). Раньше
+    // setSupportMultipleWindows не был включён и onCreateWindow не было —
+    // такие окна молча игнорировались (репорт владельца: «не могу
+    // поделиться видео»). Одно активное окно; хост — тёмный оверлей
+    // с панелью «✕ Закрыть» и WebView окна.
+    private var popupHost: FrameLayout? = null
+    private var popupWebView: WebView? = null
 
     // Поколение WebView (1.3.8): куки пишутся асинхронно, и если пока они
     //  записывались WebView успели пересобрать (быстрое переключение кнопок,
@@ -165,6 +181,12 @@ class MainActivity : AppCompatActivity() {
                 exitFullscreen()
                 return@addCallback
             }
+            // 1.3.23: открытое окно VK — закрыть окно, а не активити
+            val ph = popupHost
+            if (ph != null) {
+                closePopup()
+                return@addCallback
+            }
             val wv = webView
             if (wv != null && wv.canGoBack()) wv.goBack() else finish()
         }
@@ -204,9 +226,12 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun buildWebView(url: String) {
         // 1.3.23: если было полноэкранное видео — гасим его до уничтожения
-        // старого WebView (кастом-вью принадлежит его плееру).
+        // старого WebView (кастом-вью принадлежит его плееру). Открытое
+        // окно VK тоже закрываем — его WebView пересборке не мешает, но
+        // висеть над новым экраном не должен.
         val cvOld = customView
         if (cvOld != null) exitFullscreen()
+        closePopup()
         val old: WebView? = webView
         if (old != null) {
             webContainer.removeView(old)
@@ -312,6 +337,13 @@ class MainActivity : AppCompatActivity() {
         // в веб-версии VK таких сценариев практически нет; если помешает,
         // вернём жест отдельным тумблером в настройках.
         s.mediaPlaybackRequiresUserGesture = false
+        // 1.3.23: поддержка окон VK («Поделиться» открывает share.php через
+        // window.open, часть диалогов — target=_blank). Раньше окна молча
+        // игнорировались: setSupportMultipleWindows не включён, onCreateWindow
+        // нет. Открытие без жеста разрешаем: VK открывает окна из тапа,
+        // а запрет ломал легитимные диалоги (fail-open).
+        s.setSupportMultipleWindows(true)
+        s.javaScriptCanOpenWindowsAutomatically = true
         // 1.3.14: приоритет процесса рендерера. По умолчанию действует
         // политика RENDERER_PRIORITY_BOUND: когда активность уходит с экрана,
         // Chromium вправе приглушать и убивать рендерер — текущий трек доигрывает
@@ -610,6 +642,102 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ------------------------------------------------------------------
+    // 1.3.23: окно-попап VK (window.open / target=_blank): «Поделиться»
+    // у видео открывает vk.ru/share.php именно так. Раньше окна молча
+    // игнорировались — кнопка «Поделиться» ничего не делала.
+    // ------------------------------------------------------------------
+
+    // Создаёт окно и отдаёт его транспорт WebView-ядру. Адрес ядро грузит
+    // само (наш WebView получает уже целевой URL — loadUrl не нужен).
+    fun openPopupWindow(resultMsg: Message): Boolean {
+        // одно активное окно: повторный window.open закрывает прежнее
+        closePopup()
+        val host = FrameLayout(this)
+        host.setBackgroundColor(0xF2141414.toInt())
+        val wv = PlaybackWebView(this)
+        applySettings(wv)
+        // шим navigator.share + расширения — в окне тоже (fail-open)
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            WebViewCompat.addDocumentStartJavaScript(
+                wv, ExtensionEngine.buildScript(), ExtensionEngine.ALLOWED_ORIGINS
+            )
+        }
+        // Клиент окна — упрощённый: VK-редиректы/адблок живут в основном
+        // WebView, окну нужна сеть/куки/JS и честный выход при смерти рендера
+        wv.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                closePopup()
+                return true
+            }
+        }
+        wv.webChromeClient = VkWebChromeClient(this)
+        wv.addJavascriptInterface(bridge, "VkbBridge")
+        CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+        // Панель поверх окна: «✕ Закрыть» (окно VK закрывается и само —
+        // window.close → onCloseWindow — но у share.php крестик свой не всегда)
+        val d = resources.displayMetrics.density
+        val pad = (12 * d).toInt()
+        val bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        bar.setBackgroundColor(0xFF1C1C1E.toInt())
+        val closeBtn = TextView(this)
+        closeBtn.text = "✕ Закрыть"
+        closeBtn.setTextColor(0xFF71AAEB.toInt())
+        closeBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        closeBtn.setPadding(pad, pad / 2, pad, pad / 2)
+        closeBtn.setOnClickListener { closePopup() }
+        bar.addView(closeBtn)
+        host.addView(
+            wv,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        host.addView(
+            bar,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        val content = findViewById<ViewGroup>(android.R.id.content)
+        content.addView(
+            host,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        popupHost = host
+        popupWebView = wv
+        val obj: Any? = resultMsg.obj
+        if (obj is WebView.WebViewTransport) {
+            obj.webView = wv
+            return true
+        }
+        closePopup()
+        return false
+    }
+
+    // Закрытие окна: панель «✕ Закрыть», «назад», window.close,
+    // смерть рендера, пересборка WebView.
+    fun closePopup() {
+        val host = popupHost
+        val wv = popupWebView
+        popupHost = null
+        popupWebView = null
+        if (host == null) return
+        val content = findViewById<ViewGroup>(android.R.id.content)
+        content.removeView(host)
+        if (wv != null) {
+            wv.loadUrl("about:blank")
+            wv.destroy()
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Жизненный цикл
     // ------------------------------------------------------------------
 
@@ -709,6 +837,8 @@ class MainActivity : AppCompatActivity() {
         // (кастом-вью уйдёт вместе с окном, колбэк уже не нужен)
         customView = null
         customViewCallback = null
+        popupHost = null
+        popupWebView = null
         // 1.3.23: вкладка «Музыка» лежит в задаче ПОД нами, и систему ничего
         // не обязывает хранить остановленную активити: при блокировке экрана
         // или сворачивании прошивка/память УНИЧТОЖАЮТ MainActivity, ПОКА

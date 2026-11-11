@@ -59,4 +59,20 @@ class VkWebChromeClient(private val activity: MainActivity) : WebChromeClient() 
     override fun onHideCustomView() {
         activity.exitFullscreen()
     }
+
+    // 1.3.23: окна VK («Поделиться» у видео открывает share.php через
+    // window.open, часть диалогов — target=_blank). Раньше onCreateWindow
+    // не было и setSupportMultipleWindows не включался — такие окна молча
+    // игнорировались (репорт владельца: «не могу поделиться видео»).
+    override fun onCreateWindow(
+        view: WebView,
+        isDialog: Boolean,
+        isUserGesture: Boolean,
+        resultMsg: android.os.Message
+    ): Boolean = activity.openPopupWindow(resultMsg)
+
+    // окно закрыло само себя (window.close)
+    override fun onCloseWindow(window: WebView) {
+        activity.closePopup()
+    }
 }

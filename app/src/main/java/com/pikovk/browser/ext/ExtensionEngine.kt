@@ -53,6 +53,35 @@ object ExtensionEngine {
         "https://vkvideo.ru", "https://*.vkvideo.ru"
     )
 
+    // ------------------------------------------------------------------
+    // 1.3.23. Шим Web Share API. Android WebView НЕ реализует
+    // navigator.share/navigator.canShare — сайт по проверке
+    // «typeof navigator.share === 'function'» считает, что общий доступ
+    // недоступен: у видео VK кнопка «Поделиться» молча ничего не делала
+    // (репорт владельца). Шим ставится только если нативного API нет
+    // (обычный Chrome на Android его имеет — не перетираем) и зовёт мост
+    // VkbBridge.share(text, url) → системный chooser Android.
+    // Без '$' и шаблонных строк, только // -комментарии.
+    // ------------------------------------------------------------------
+    private val SHARE_JS = """
+        try{
+          if (typeof navigator.share !== 'function'){
+            navigator.canShare = function(){ return true; };
+            navigator.share = function(data){
+              var d = data || {};
+              var txt = (d.text || '') + '';
+              var url = (d.url || '') + '';
+              try{
+                if (window.VkbBridge && window.VkbBridge.share){
+                  window.VkbBridge.share(txt, url);
+                }
+              }catch(e){}
+              return Promise.resolve();
+            };
+          }
+        }catch(e){}
+    """.trimIndent()
+
     fun buildScript(): String {
         val sb = StringBuilder()
         sb.append("(function(){'use strict';")
@@ -61,6 +90,10 @@ object ExtensionEngine {
             .append(",tweaks:").append(Prefs.extTweaks)
             .append(",adblock:").append(Prefs.extAdBlock).append("};")
         sb.append(COMMON_JS)
+        // Шим navigator.share — всегда, без тумблера (репорт владельца:
+        // «не могу поделиться видео» — в Android WebView Web Share API
+        // не реализован, VK по его отсутствию молча ломал кнопку)
+        sb.append(SHARE_JS)
         if (Prefs.extDark) sb.append(DARK_JS)
         if (Prefs.extTweaks) sb.append(TWEAKS_JS)
         if (Prefs.extMedia) sb.append(MEDIA_JS)

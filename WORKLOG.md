@@ -157,6 +157,12 @@
 
 - Минималистичный интерфейс (нижняя панель) против полного (адресная строка), ускорение ленты, мультиаккаунт (3 cookie-слота), BootReceiver для фоновых уведомлений.
 
+## 2026-11-11 — доработка-10: кнопка «Поделиться» у видео
+- Репорт владельца: «не могу поделиться видео при нажатии на кнопку поделиться». Две причины, обе — ограничения WebView, обе закрыты:
+- **navigator.share не реализован в Android WebView** (Web Share API отсутствует): VK проверяет `typeof navigator.share === 'function'` и по провалу молча ломает кнопку. Добавлен шим SHARE_JS (ExtensionEngine, внедряется document-start всегда, без тумблера): если нативного API нет — `navigator.share`/`navigator.canShare` мостом `VkbBridge.share(text,url)` → системный chooser Android (ACTION_SEND, текст+ссылка). На Chrome с нативным API шим не перетирает его (typeof-проверка).
+- **Окна VK игнорировались**: «Поделиться» в полной версии открывает vk.ru/share.php через window.open (и часть диалогов — target=_blank); `setSupportMultipleWindows` не включался, `onCreateWindow` не было — окно молча не открывалось. Теперь: `setSupportMultipleWindows(true)` + `javaScriptCanOpenWindowsAutomatically=true` (открывается и без жеста — fail-open) + `VkWebChromeClient.onCreateWindow/onCloseWindow` → `MainActivity.openPopupWindow/closePopup`: одно активное окно — тёмный оверлей с панелью «✕ Закрыть» и WebView (PlaybackWebView, настройки/шим расширений/мост VkbBridge/сторонние куки; упрощённый WebViewClient — смерть рендера закрывает окно; window.close закрывает сам). «Назад» при открытом окне закрывает окно (полный экран приоритетнее), любая пересборка WebView закрывает окно.
+- Проверки: SHARE_JS синтаксис (node --check) + поведение (установка при отсутствии API, передача text/url в мост, вызов без text) — OK; check_piko_1323.py OK. Компиляция — владельцем.
+
 ## 2026-11-11 — доработка-9: полноэкранное видео в браузере (кнопка «развернуть»)
 - Репорт владельца: «у видео отсутствует кнопка развернуть на весь экран». Причина: в `VkWebChromeClient` не было переопределены `onShowCustomView`/`onHideCustomView` — WebView в этом случае сообщает странице `document.fullscreenEnabled = false`, и плеер VK прячет кнопку разворачивания (кнопки нет не из-за CSS/страницы, а из-за отсутствия поддержки Fullscreen API на стороне клиента WebView).
 - `VkWebChromeClient`: добавлены оба метода, показ/скрытие передаётся в MainActivity (`enterFullscreen`/`exitFullscreen`).

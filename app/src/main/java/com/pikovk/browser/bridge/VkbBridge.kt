@@ -2,6 +2,7 @@ package com.pikovk.browser.bridge
 
 import android.app.DownloadManager
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Environment
 import android.os.Handler
@@ -32,6 +33,28 @@ class VkbBridge(private val context: Context) {
     fun download(url: String) {
         runCatching { VkbBridge.enqueueNamed(context, url, fileName(url)) }
             .onFailure { toast("Не удалось начать скачивание") }
+    }
+
+    // 1.3.23: системный диалог «Поделиться». Мост для шима navigator.share
+    // (SHARE_JS в ExtensionEngine): Android WebView не реализует Web Share
+    // API, и VK по его отсутствию молча ломал кнопку «Поделиться» у видео.
+    // Открытие chooser — через main-хендлер (вызов приходит из JS-потока).
+    @JavascriptInterface
+    fun share(text: String, url: String) {
+        main.post {
+            runCatching {
+                val send = Intent(Intent.ACTION_SEND)
+                send.type = "text/plain"
+                // текст и ссылка вместе; ссылка главная (VK шлёт url отдельным полем)
+                val body: String = when {
+                    url.isNotBlank() && text.isNotBlank() && text != url -> text + " " + url
+                    url.isNotBlank() -> url
+                    else -> text
+                }
+                send.putExtra(Intent.EXTRA_TEXT, body)
+                context.startActivity(Intent.createChooser(send, "Поделиться"))
+            }.onFailure { toast("Не удалось открыть общий доступ") }
+        }
     }
 
     // 1.3.21: состояние плеера VK (вызывается из PLAYER_JS раз в 3 с).
