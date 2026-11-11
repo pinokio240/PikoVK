@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
 import android.webkit.ValueCallback
@@ -26,6 +27,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.pikovk.browser.R
@@ -60,6 +64,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnDesktop: ImageButton
 
     private var webView: WebView? = null
+
+    // 1.3.23: полноэкранное видео (onShowCustomView). Кастом-вью плеера
+    // кладётся поверх всего содержимого окна; пока она показана — «назад»
+    // сначала гасит полный экран, а пересборка WebView невозможна.
+    private var customView: View? = null
+    private var customViewCallback: WebChromeClient.CustomViewCallback? = null
 
     // Поколение WebView (1.3.8): куки пишутся асинхронно, и если пока они
     //  записывались WebView успели пересобрать (быстрое переключение кнопок,
@@ -149,6 +159,12 @@ class MainActivity : AppCompatActivity() {
         btnDesktop.setOnClickListener { toggleDesktop() }
 
         onBackPressedDispatcher.addCallback(this) {
+            // 1.3.23: в полноэкранном видео «назад» — выход из полного экрана
+            val cv = customView
+            if (cv != null) {
+                exitFullscreen()
+                return@addCallback
+            }
             val wv = webView
             if (wv != null && wv.canGoBack()) wv.goBack() else finish()
         }
@@ -187,6 +203,10 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun buildWebView(url: String) {
+        // 1.3.23: если было полноэкранное видео — гасим его до уничтожения
+        // старого WebView (кастом-вью принадлежит его плееру).
+        val cvOld = customView
+        if (cvOld != null) exitFullscreen()
         val old: WebView? = webView
         if (old != null) {
             webContainer.removeView(old)
@@ -529,6 +549,67 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ------------------------------------------------------------------
+    // 1.3.23: полноэкранное видео (кнопка «развернуть» в плеере VK)
+    // ------------------------------------------------------------------
+
+    // Вызывается из VkWebChromeClient.onShowCustomView. Повторный показ
+    // (страница не дождалась onHide) — просто подтверждаем скрытие.
+    fun enterFullscreen(view: View, callback: WebChromeClient.CustomViewCallback) {
+        val existing = customView
+        if (existing != null) {
+            callback.onCustomViewHidden()
+            return
+        }
+        customView = view
+        customViewCallback = callback
+        // Прячем свой интерфейс: экран полностью отдан плееру
+        urlBar.visibility = View.GONE
+        progressBar.visibility = View.GONE
+        webContainer.visibility = View.GONE
+        view.keepScreenOn = true
+        val content = findViewById<ViewGroup>(android.R.id.content)
+        content.addView(
+            view,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        applyImmersive(true)
+    }
+
+    // Вызывается из VkWebChromeClient.onHideCustomView, кнопки «назад» и
+    // перед любой пересборкой WebView (toggleDesktop, профиль, рендер).
+    fun exitFullscreen() {
+        val view = customView
+        if (view == null) return
+        customView = null
+        val cb = customViewCallback
+        customViewCallback = null
+        view.keepScreenOn = false
+        val content = findViewById<ViewGroup>(android.R.id.content)
+        content.removeView(view)
+        webContainer.visibility = View.VISIBLE
+        urlBar.visibility = if (Prefs.uiMode == Prefs.UI_FULL) View.VISIBLE else View.GONE
+        applyImmersive(false)
+        if (cb != null) cb.onCustomViewHidden()
+    }
+
+    // Полный экран = системные панели спрятаны (возврат — свайпом).
+    private fun applyImmersive(on: Boolean) {
+        val win = window
+        WindowCompat.setDecorFitsSystemWindows(win, !on)
+        val controller = WindowInsetsControllerCompat(win, win.decorView)
+        if (on) {
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Жизненный цикл
     // ------------------------------------------------------------------
 
@@ -624,6 +705,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // 1.3.23: если окно умирает в полноэкранном видео — чистим ссылку
+        // (кастом-вью уйдёт вместе с окном, колбэк уже не нужен)
+        customView = null
+        customViewCallback = null
         // 1.3.23: вкладка «Музыка» лежит в задаче ПОД нами, и систему ничего
         // не обязывает хранить остановленную активити: при блокировке экрана
         // или сворачивании прошивка/память УНИЧТОЖАЮТ MainActivity, ПОКА

@@ -2,6 +2,7 @@ package com.pikovk.browser.browser
 
 import android.app.AlertDialog
 import android.net.Uri
+import android.view.View
 import android.webkit.JsResult
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -9,8 +10,10 @@ import android.webkit.WebView
 import com.pikovk.browser.ui.MainActivity
 
 // Chrome-клиент: прогресс, диалоги confirm/alert (нужны расширению
-// «скачивание медиа»), выбор файлов (загрузка аватара и т.п.).
-// Камера и микрофон запрещены.
+// «скачивание медиа»), выбор файлов (загрузка аватара и т.п.),
+// полноэкранное видео (кнопка «развернуть» в плеере VK видна, только
+// когда WebView умеет onShowCustomView — иначе fullscreenEnabled=false
+// и VK прячет кнопку). Камера и микрофон запрещены.
 class VkWebChromeClient(private val activity: MainActivity) : WebChromeClient() {
 
     override fun onProgressChanged(view: WebView, newProgress: Int) {
@@ -44,5 +47,16 @@ class VkWebChromeClient(private val activity: MainActivity) : WebChromeClient() 
 
     override fun onPermissionRequest(request: PermissionRequest) {
         request.deny()
+    }
+
+    // 1.3.23: полноэкранное видео. Без этих двух методов WebView сообщает
+    // странице «полный экран недоступен», и плеер VK не показывает кнопку
+    // разворачивания. Показ/скрытие delegated в MainActivity.
+    override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+        activity.enterFullscreen(view, callback)
+    }
+
+    override fun onHideCustomView() {
+        activity.exitFullscreen()
     }
 }
