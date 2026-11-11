@@ -622,6 +622,26 @@ object ExtensionEngine {
     //                                        VKWebApp* (репорт владельца:
     //                                        лог 11.11.2026, app 7786561)
     //
+    // 1.3.23 доработка-12 (репорт: «банер всё пано остался» — селекторы
+    // vtosters не покрыли вёрстку владельца): классы ленты VK нестабильны,
+    // поэтому добавлен содержательный уровень. Всё fail-open и только для
+    // страниц ленты («/» и «/feed*»), обычные посты/сторис/открытые
+    // мини-аппы не трогаются:
+    //   1) семейные маски классов [class*="apps_feedRightAppsBlock"],
+    //      [class*="NewMiniApps"] и старые мобильные .apps_feed/#apps_feed
+    //      (CSS) — вместо точных имён, которые VK меняет;
+    //   2) скан ссылок на мини-приложения (/app<цифры> на хостах VK, в т.ч.
+    //      внутри away.php): карточка баннера = узел над ссылкой, под
+    //      которым начинается список постов (или ≥12 детей-соседей),
+    //      высота ≤800px и есть img; ссылка внутри поста/сторис — отбой;
+    //   3) скан iframe[src*="vk-apps.ru"] (встроенные превью мини-аппов):
+    //      карточка прячется, найденный контейнер-ПОСТ не прячется никогда;
+    //      на открытой странице приложения (/app<цифры> в адресе) сканы
+    //      выключены целиком;
+    //   4) метка «Реклама» (текст листа ровно «Реклама») — карточка с ней
+    //      прячется целиком даже без известных классов новой вёрстки;
+    //      найденный контейнер-ПОСТ не прячется никогда.
+    //
     // СОЗНАТЕЛЬНО НЕ ВКЛЮЧЕНО (риск для контента):
     //   [class^="ads"] / [class*="ads"]    — слишком широко, ломает контент;
     //   широкие маски из PinoK ([class*="ad-"] совпадает с "download-...",
@@ -685,6 +705,13 @@ object ExtensionEngine {
             // iframe с мостом VKWebApp*): блоки промо мини-приложений в ленте
             +',.apps_feedRightAppsBlock,.NewMiniAppsRightBlock__root'
             +',#feed_mini_apps_recomm,.feedAssistancePromoButtonInstallApp'
+            // 1.3.23 доработка-12: баннер оставался — вёрстка VK меняет
+            // суффиксы классов, поэтому прячем СЕМЕЙСТВА классов (покрывают
+            // все варианты vtosters и будущие) и старые блоки мобильной
+            // ленты
+            +',[class*="apps_feedRightAppsBlock"]'
+            +',[class*="NewMiniApps"]'
+            +',.apps_feed,#apps_feed'
             +'{display:none!important}';
           vkbMount(ab);
         }catch(e){}
@@ -944,12 +971,174 @@ object ExtensionEngine {
               }
             }catch(e){}
           }
+          // 1.3.23 доработка-12: промо-баннер мини-приложений в ленте
+          // (репорт: тап открыл app 7786561 в iframe vk-apps.ru) не имеет
+          // ни плашки «Реклама», ни ссылок на ad-домены — карточка ведёт
+          // на страницу мини-приложения /app<цифры>. Классы новой вёрстки
+          // неизвестны, поэтому карточка ищется по СОДЕРЖИМОМУ. Всё
+          // fail-open: обычные посты, сторис и открытые мини-аппы
+          // не трогаются.
+          function vkbAdIsFeedPage(){
+            var p='';
+            try{p=location.pathname;}catch(e){return false;}
+            return p==='/'||p.indexOf('/feed')===0;
+          }
+          function vkbAdIsAppPage(){
+            var p='';
+            try{p=location.pathname;}catch(e){return false;}
+            if(p.indexOf('/app')!==0){return false;}
+            var c=p.charAt(4);
+            return c>='0'&&c<='9';
+          }
+          function vkbAdIsPostNode(p){
+            try{
+              if(p.hasAttribute&&p.hasAttribute('data-post-id')){return true;}
+              var cls=(p.className&&typeof p.className==='string')?p.className:'';
+              if(cls){
+                var parts=cls.split(/\s+/);
+                var PT=['_post','wall_item','feed_row','wall_module','wi','pi','Post','feed_post'];
+                for(var i=0;i<parts.length;i++){
+                  for(var j=0;j<PT.length;j++){
+                    if(parts[i]===PT[j]){return true;}
+                  }
+                }
+              }
+              var pid=p.id||'';
+              if(pid.lastIndexOf('post',0)===0){return true;}
+            }catch(e){}
+            return false;
+          }
+          function vkbAdInStories(from){
+            var p=from;
+            try{
+              while(p&&p!==document.body){
+                var cls=(p.className&&typeof p.className==='string')?p.className:'';
+                if(cls&&cls.toLowerCase().indexOf('stor')>=0){return true;}
+                p=p.parentElement;
+              }
+            }catch(e){}
+            return false;
+          }
+          // карточка баннера = узел над ссылкой, под которым начинается
+          // список постов (или у которого ≥12 прямых детей); выше этого
+          // узла подъём прекращается — колонки и обёртки страницы
+          // не прячутся никогда
+          function vkbAdHideAppWidget(from){
+            try{
+              if(!vkbAdIsFeedPage()||vkbAdIsAppPage()){return;}
+              if(vkbAdInStories(from)){return;}
+              var p=from;var cand=null;var bounded=false;
+              while(p&&p!==document.body){
+                if(vkbAdIsPostNode(p)){return;}
+                var hasPosts=false;
+                try{hasPosts=p.querySelector('[data-post-id],._post,.wall_item,.feed_row')!=null;}catch(e){}
+                if(hasPosts){bounded=true;break;}
+                var kids=0;
+                try{kids=p.childElementCount;}catch(e){}
+                if(kids>=12){bounded=true;break;}
+                cand=p;
+                p=p.parentElement;
+              }
+              if(!bounded||!cand){return;}
+              var h=0;
+              try{h=cand.getBoundingClientRect().height;}catch(e){}
+              if(h>800){return;}
+              var img=false;
+              try{img=cand.querySelector('img')!=null;}catch(e){}
+              if(!img){return;}
+              cand.style.display='none';
+            }catch(e){}
+          }
+          function vkbAdScanAppLinks(root){
+            try{
+              if(!vkbAdIsFeedPage()||vkbAdIsAppPage()){return;}
+              var scope=(root&&root.querySelectorAll)?root:document;
+              var list=[];
+              var SEL='a[href]';
+              if(scope!==document&&scope.matches&&scope.matches(SEL)){list.push(scope);}
+              var found=scope.querySelectorAll(SEL);
+              for(var q=0;q<found.length;q++){list.push(found[q]);}
+              for(var k=0;k<list.length;k++){
+                var el=list[k];
+                var h=el.getAttribute('href')||'';
+                if(!h){continue;}
+                var hit=false;
+                var u=null;
+                try{u=new URL(h,location.href);}catch(e){u=null;}
+                if(u&&vkbAdIsVkHost(u)&&vkbAdIsAppPath(u.pathname)){hit=true;}
+                if(!hit&&vkbAdHasVkAppLead(h)){hit=true;}
+                if(!hit&&h.indexOf('away.php')>=0){
+                  var d=h;
+                  if(h.indexOf('%')>=0){try{d=decodeURIComponent(h);}catch(e){d=h;}}
+                  if(vkbAdHasVkAppLead(d)){hit=true;}
+                }
+                if(hit){vkbAdHideAppWidget(el);}
+              }
+            }catch(e){}
+          }
+          // промо-баннер бывает встроенным превью мини-аппа — iframe
+          // vk-apps.ru прямо в карточке ленты; открытая страница
+          // приложения и посты со встроенными апами не прячутся
+          function vkbAdScanAppFrames(root){
+            try{
+              if(!vkbAdIsFeedPage()||vkbAdIsAppPage()){return;}
+              var scope=(root&&root.querySelectorAll)?root:document;
+              var list=[];
+              var SEL='iframe[src]';
+              if(scope!==document&&scope.matches&&scope.matches(SEL)){list.push(scope);}
+              var found=scope.querySelectorAll(SEL);
+              for(var q=0;q<found.length;q++){list.push(found[q]);}
+              for(var k=0;k<list.length;k++){
+                var el=list[k];
+                var h=el.getAttribute('src')||'';
+                if(h.indexOf('vk-apps.ru')===-1){continue;}
+                var card=vkbAdFindCard(el);
+                if(card&&!vkbAdIsPostNode(card)){card.style.display='none';continue;}
+                vkbAdHideAppWidget(el);
+              }
+            }catch(e){}
+          }
+          // карточка рекламы в новой вёрстке без известных классов: у неё
+          // есть лист-метка с текстом ровно «Реклама» — карточка прячется
+          // целиком, но ТОЛЬКО если найденный контейнер не пост (слово
+          // «Реклама» в тексте/комменте поста пост не прячет)
+          function vkbAdScanLabels(root){
+            try{
+              if(!vkbAdIsFeedPage()){return;}
+              var scope=(root&&root.querySelectorAll)?root:document;
+              var list=[];
+              if(scope!==document&&scope.textContent&&scope.textContent.length<=24){list.push(scope);}
+              var all=scope.querySelectorAll('*');
+              for(var q=0;q<all.length;q++){
+                var el=all[q];
+                if(el.children&&el.children.length>0){continue;}
+                var t=el.textContent||'';
+                if(t.length>24){continue;}
+                list.push(el);
+              }
+              for(var k=0;k<list.length;k++){
+                var el=list[k];
+                var t='';
+                try{t=(el.textContent||'').replace(/\s+/g,'');}catch(e){}
+                if(t!=='Реклама'){continue;}
+                var card=vkbAdFindCard(el);
+                if(card){
+                  if(!vkbAdIsPostNode(card)){card.style.display='none';}
+                  continue;
+                }
+                vkbAdHideAppWidget(el);
+              }
+            }catch(e){}
+          }
           var adQueue=[];var adTimer=null;
           function vkbAdFlush(){
             adTimer=null;
             try{
               var q=adQueue;adQueue=[];
-              for(var i=0;i<q.length;i++){vkbAdScan(q[i]);vkbAdScanMarkers(q[i]);}
+              for(var i=0;i<q.length;i++){
+                vkbAdScan(q[i]);vkbAdScanMarkers(q[i]);
+                vkbAdScanAppLinks(q[i]);vkbAdScanAppFrames(q[i]);vkbAdScanLabels(q[i]);
+              }
             }catch(e){}
           }
           function vkbAdObserve(muts){
@@ -978,11 +1167,17 @@ object ExtensionEngine {
           // поздней разметки (реклама вставляется после стартового скана
           // в обход наблюдателя).
           function vkbAdSweep(){
-            try{vkbAdScan();vkbAdScanMarkers();}catch(e){}
+            try{
+              vkbAdScan();vkbAdScanMarkers();
+              vkbAdScanAppLinks();vkbAdScanAppFrames();vkbAdScanLabels();
+            }catch(e){}
           }
           function vkbAdStart(){
             vkbAdScan();
             vkbAdScanMarkers();
+            vkbAdScanAppLinks();
+            vkbAdScanAppFrames();
+            vkbAdScanLabels();
             try{new MutationObserver(vkbAdObserve).observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['href','src','onclick']});}catch(e){}
             setTimeout(vkbAdSweep,1000);
             setTimeout(vkbAdSweep,3000);
