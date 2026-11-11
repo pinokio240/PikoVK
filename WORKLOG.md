@@ -157,6 +157,12 @@
 
 - Минималистичный интерфейс (нижняя панель) против полного (адресная строка), ускорение ленты, мультиаккаунт (3 cookie-слота), BootReceiver для фоновых уведомлений.
 
+## 2026-11-11 — доработка-11: баннер промо мини-приложений в ленте скрыт
+- Репорт владельца: «тапнул по рекламному банеру — что это и как убрать». Разбор лога (upload/Pasted Content_1794399816933.txt): после тапа в странице поднялся iframe мини-приложения VK `prod-app7786561-...pages-ac.vk-apps.ru` с полным мостом VKWebApp* (Init/GetUserInfo/Storage/CallAPIMethod/SetLocation) и звуком — то есть баннер был промо-карточкой МИНИ-ПРИЛОЖЕНИЯ в ленте (VK Ads рекламирует мини-аппы карточками прямо в ленте; сам app 7786561 публично «App deleted», жив только внутри ленты).
+- Источник — известные блоки «Баннеры с приложениями вк в ленте» (фильтр vtosters/adblock 3.19): `.apps_feedRightAppsBlock` (+варианты new_apps/single_app/collaborative), `.NewMiniAppsRightBlock__root`, `#feed_mini_apps_recomm` (полная версия) и `.feedAssistancePromoButtonInstallApp` (мобильная).
+- AD_BLOCK_JS дополнен четырьмя селекторами (родительский `.apps_feedRightAppsBlock` покрывает все варианты и `__row`); легенда селекторов дополнена. `stats.vk-portal.net` (пинг статистики из лога) уже был в TRACKER_HOSTS.
+- Проверка: AD_BLOCK_JS собран из Kotlin-сырых строк и исполнен в Node (CSS 674 симв., все 4 новых селектора присутствуют, аномалий склейки нет); check_piko_1323.py OK. Компиляция — владельцем.
+
 ## 2026-11-11 — доработка-10: кнопка «Поделиться» у видео
 - Репорт владельца: «не могу поделиться видео при нажатии на кнопку поделиться». Две причины, обе — ограничения WebView, обе закрыты:
 - **navigator.share не реализован в Android WebView** (Web Share API отсутствует): VK проверяет `typeof navigator.share === 'function'` и по провалу молча ломает кнопку. Добавлен шим SHARE_JS (ExtensionEngine, внедряется document-start всегда, без тумблера): если нативного API нет — `navigator.share`/`navigator.canShare` мостом `VkbBridge.share(text,url)` → системный chooser Android (ACTION_SEND, текст+ссылка). На Chrome с нативным API шим не перетирает его (typeof-проверка).

@@ -614,6 +614,13 @@ object ExtensionEngine {
     //   .story_feed_new_item_promo         — промо-сторис
     //   #apps_ads_wrap,                    — баннеры приложений/спецпромо
     //     #ads_special_promo_wrap
+    //   .apps_feedRightAppsBlock,          — «Баннеры с приложениями вк в
+    //     .NewMiniAppsRightBlock__root,      ленте» (vtosters 3.19): промо
+    //     #feed_mini_apps_recomm,            мини-приложений в ленте; тап
+    //     .feedAssistancePromoButtonInstallApp по такому баннеру открывает
+    //                                        мини-апп в iframe с мостом
+    //                                        VKWebApp* (репорт владельца:
+    //                                        лог 11.11.2026, app 7786561)
     //
     // СОЗНАТЕЛЬНО НЕ ВКЛЮЧЕНО (риск для контента):
     //   [class^="ads"] / [class*="ads"]    — слишком широко, ломает контент;
@@ -672,6 +679,12 @@ object ExtensionEngine {
             +',.ads300-thumb,.ads600x200,.ads_600x200,.trg-b-banner-block'
             +',div[data-ad],.post[data-ad-view],#_ads_block_data_w'
             +',#mailru-visibility-check,div[id^="postadsite_"]'
+            // 1.3.23 доработка-11 (vtosters/adblock «Баннеры с приложениями
+            // вк в ленте»): репорт владельца «тапнул по рекламному банеру» —
+            // лог показал промо мини-приложения (app 7786561 открылся в
+            // iframe с мостом VKWebApp*): блоки промо мини-приложений в ленте
+            +',.apps_feedRightAppsBlock,.NewMiniAppsRightBlock__root'
+            +',#feed_mini_apps_recomm,.feedAssistancePromoButtonInstallApp'
             +'{display:none!important}';
           vkbMount(ab);
         }catch(e){}
