@@ -29,16 +29,20 @@ import java.io.IOException
 // модуль 49032 XZ) — как это делает их нормализатор: тема, написанная
 // «по-старому», красит и новые VKUI-компоненты.
 //
-// ПРИМЕНЕНИЕ: THEME_JS (см. ExtensionEngine) при document_start ставит
-// все переменные ИНЛАЙН на <html> (documentElement.style.setProperty).
-// Инлайн сильнее любого таблицного правила без !important, поэтому ничего
-// не зависит от порядка <style>-тегов VK (в отличие от расширения, воюющего
-// за порядок стилей). documentElement переживает SPA-переходы, поэтому
-// повторно применяется только на DOMContentLoaded (на случай замены <html>
-// при полной навигации). Для тёмных тем принудительно выставляются
-// VKUI-классы vkui--vkBase/vkCom/vkIOS--dark: там, где наши переменные не
-// покрывают токен, VK подставит значения собственной тёмной схемы, а не
-// светлой.
+// ПРИМЕНЕНИЕ: THEME_JS (см. ExtensionEngine) при document_start ставит все
+// переменные ИНЛАЙН с 'important' на documentElement, body и корни VKUI
+// (.vkui__root/.vkui__portal-root/.vkui__popout-root/.vkuiAppRoot): инлайн
+// с important на элементе сильнее любых таблицных правил VK на нём же —
+// в том числе их !important. Инлайн на <html> одного недостаточно: VKUI
+// объявляет токены правилами на своих контейнерах, а объявление на
+// контейнере бьёт унаследованное с <html>. ВАЖНО: VK гидратирует страницу
+// (переписывает разметку и классы), поэтому применение ПОВТОРЯЕТСЯ: на
+// DOMContentLoaded/load/pageshow, 8 отложенных свипов до 2 с, и дальше по
+// MutationObserver (атрибуты class/style на <html>; появление корней в
+// <body> — childList, с debounce 100 мс). Для тёмных тем принудительно
+// выставляются VKUI-классы vkui--vkBase/vkCom/vkIOS--dark и
+// style.colorScheme: там, где наши переменные не покрывают токен, VK
+// подставит значения собственной тёмной схемы, а не светлой.
 //
 // ГЕЙТИНГ (важно): выбранная тема перекрывает тумблер «Тёмная тема».
 //   - «Не менять» и «Тёмная (как в VK)» — прежнее поведение: куки темы
@@ -84,6 +88,43 @@ object VkThemes {
         return id == THEME_LIGHT || id == THEME_GRAY || id == THEME_BLACK
     }
 
+    // Шаблон JS-чанка темы. Плейсхолдеры: %TV% — компактный JSON карты
+    // переменных (он же валидный литерал JS: значения — hex-цвета, кавычек
+    // и скобок внутри нет), %TD% — true/false (тёмная ли тема). Тот же
+    // шаблон прогоняет scripts/check_theme_apply.js на мини-DOM: проверка
+    // синтаксиса и логики применения (html/body/корни, классы, повторы).
+    private const val THEME_JS = """try{var TV=%TV%,TD=%TD%;
+function vkbThemeApply(){
+try{
+var els=[document.documentElement,document.body];
+try{
+var rs=document.querySelectorAll('.vkui__root,.vkui__portal-root,.vkui__popout-root,.vkuiAppRoot');
+for(var r=0;r<rs.length;r++)els.push(rs[r]);
+}catch(e){}
+for(var i=0;i<els.length;i++){
+var el=els[i];if(!el||!el.style)continue;
+for(var k in TV){try{el.style.setProperty(k,TV[k],'important');}catch(e){}}
+}
+}catch(e){}
+try{
+var el=document.documentElement;if(!el)return;
+var dk=['vkui--vkBase--dark','vkui--vkCom--dark','vkui--vkIOS--dark'];
+var lt=['vkui--vkBase--light','vkui--vkCom--light','vkui--vkIOS--light'];
+for(var i=0;i<3;i++){el.classList.remove(dk[i]);el.classList.remove(lt[i]);}
+var cls=TD?dk:lt;
+for(var j=0;j<3;j++)el.classList.add(cls[j]);
+el.style.colorScheme=TD?'dark':'light';
+}catch(e){}
+}
+vkbThemeApply();
+document.addEventListener('DOMContentLoaded',vkbThemeApply);
+window.addEventListener('load',vkbThemeApply);
+window.addEventListener('pageshow',vkbThemeApply);
+for(var n=1;n<=8;n++)setTimeout(vkbThemeApply,250*n);
+try{new MutationObserver(function(){try{vkbThemeApply();}catch(e){}}).observe(document.documentElement,{attributes:true,attributeFilter:['class','style']});}catch(e){}
+try{var vkbBody=document.body||document.documentElement;var vkbT=0;new MutationObserver(function(){try{clearTimeout(vkbT);vkbT=setTimeout(function(){try{vkbThemeApply();}catch(e){}},100);}catch(e){}}).observe(vkbBody,{childList:true});}catch(e){}
+}catch(e){}"""
+
     // JS-чанк темы для ExtensionEngine.buildScript. Пустая строка — чанк не
     // нужен («Не менять», «Тёмная (как в VK)», неизвестный id, сбой чтения).
     fun buildThemeJs(ctx: Context, id: String): String {
@@ -95,29 +136,9 @@ object VkThemes {
         }
         val dark = theme.first
         val vars = theme.second
-        // JSONObject.toString — компактный JSON; он же валидный литерал JS
-        // (значения — hex-цвета, кавычек и скобок внутри нет).
-        val varsJson = vars.toString()
-        return buildString {
-            append("try{var TV=")
-            append(varsJson)
-            append(",TD=").append(dark)
-            append(
-                ";function vkbThemeApply(){" +
-                    "var el=document.documentElement;" +
-                    "if(!el)return;" +
-                    "for(var k in TV){try{el.style.setProperty(k,TV[k]);}catch(e){}}" +
-                    "try{var dk=['vkui--vkBase--dark','vkui--vkCom--dark','vkui--vkIOS--dark'];" +
-                    "var lt=['vkui--vkBase--light','vkui--vkCom--light','vkui--vkIOS--light'];" +
-                    "for(var i=0;i<3;i++){el.classList.remove(dk[i]);el.classList.remove(lt[i]);}" +
-                    "var cls=TD?dk:lt;" +
-                    "for(var j=0;j<3;j++){el.classList.add(cls[j]);}}catch(e){}" +
-                "}" +
-                "vkbThemeApply();" +
-                "document.addEventListener('DOMContentLoaded',vkbThemeApply,{once:true});"
-            )
-            append("}catch(e){}")
-        }
+        return THEME_JS
+            .replace("%TV%", vars.toString())
+            .replace("%TD%", dark.toString())
     }
 
     // Прочитать темы из assets. Сбой чтения/парсинга — пустая карта

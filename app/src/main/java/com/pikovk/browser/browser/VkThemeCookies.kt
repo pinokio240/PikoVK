@@ -54,8 +54,20 @@ object VkThemeCookies {
         val cb = onApplied
         // 1.3.24: цветная тема из VK Next (Prefs.vkThemeId) перекрывает куки —
         // VK не должен рисовать свою тёмную схему поверх нашей карты цветов.
+        // 1.3.25: недостаточно «не выставлять» — куки, поставленные раньше
+        // (наша «Тёмная тема» ставит их на год) или самим VK, живут в
+        // CookieManager и VK продолжает рисовать тёмную тему: выбранная тема
+        // выглядела «как раньше». Снимаем их (Max-Age=0) и сбрасываем слот-
+        // флаг, чтобы после возврата на «Не менять» куки выставились заново.
         if (!Prefs.extDark || VkThemes.isColorTheme(Prefs.vkThemeId)) {
-            if (cb != null) cb()
+            if (VkThemes.isColorTheme(Prefs.vkThemeId)) {
+                clearDarkCookies {
+                    Prefs.setVkDarkCookiesDone(ProfileManager.activeSlot(), false)
+                    if (cb != null) cb()
+                }
+            } else {
+                if (cb != null) cb()
+            }
             return
         }
         val slot = ProfileManager.activeSlot()
@@ -73,11 +85,45 @@ object VkThemeCookies {
     // (например, владелец стёр данные VK или хочет вернуть тёмную тему
     // после смены слота). Флаг слота обновляется, чтобы больше не повторять.
     fun reapply() {
-        // 1.3.24: при активной цветной теме куки не трогаем (см. apply).
-        if (!Prefs.extDark || VkThemes.isColorTheme(Prefs.vkThemeId)) return
+        // 1.3.24/1.3.25: при активной цветной теме куки не ставим, а снимаем
+        // (см. apply) — тумблер «Тёмная тема» в этом состоянии не главный.
+        if (VkThemes.isColorTheme(Prefs.vkThemeId)) {
+            clearDarkCookies {
+                Prefs.setVkDarkCookiesDone(ProfileManager.activeSlot(), false)
+            }
+            return
+        }
+        if (!Prefs.extDark) return
         setDarkCookies {
             Prefs.setVkDarkCookiesDone(ProfileManager.activeSlot(), true)
         }
+    }
+
+    // Снять куки тёмной цветовой схемы на обоих доменах VK (Max-Age=0
+    // удаляет куку по RFC 6265). Fail-open: не удалились — VK рисует как
+    // нарисует, карта переменных всё равно применяется поверх.
+    private fun clearDarkCookies(onCommitted: () -> Unit) {
+        val writes = ArrayList<CookieWriter.Write>()
+        for (site in SITES) {
+            addClear(writes, site.first, site.second, DARK_SCHEME)
+            addClear(writes, site.first, site.second, SCHEME_MODE)
+        }
+        CookieWriter.writeAll(CookieManager.getInstance(), writes) {
+            Log.i(TAG, "куки тёмной схемы VK сняты ($DARK_SCHEME, $SCHEME_MODE) — красит цветная тема")
+            onCommitted()
+        }
+    }
+
+    // Добавить в пачку запись об удалении именованной куки на домене VK.
+    private fun addClear(
+        writes: MutableList<CookieWriter.Write>,
+        site: String,
+        domain: String,
+        name: String
+    ) {
+        writes.add(
+            CookieWriter.Write(site, "$name=; Domain=$domain; Path=/; Secure; Max-Age=0")
+        )
     }
 
     private fun setDarkCookies(onCommitted: () -> Unit) {
