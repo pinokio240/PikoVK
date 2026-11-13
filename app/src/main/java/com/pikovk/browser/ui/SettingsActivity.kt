@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 import com.pikovk.browser.R
 import com.pikovk.browser.browser.UserAgents
 import com.pikovk.browser.browser.VkThemeCookies
+import com.pikovk.browser.ext.VkThemes
 import com.pikovk.browser.media.PlaybackService
 import com.pikovk.browser.media.PlaybackWakeLock
 import com.pikovk.browser.notify.NotifyService
@@ -120,6 +121,9 @@ class SettingsActivity : AppCompatActivity() {
             Prefs.markDirty()
         }
         hint("Всегда тёмная, независимо от темы системы. Включена по умолчанию. 1.3.7: перед загрузкой выставляются родные куки темы VK (remixdark_color_scheme / remixcolor_scheme_mode из политики vk.ru/privacy/cookies) — VK сам рисует свою тёмную тему; CSS-инверсия остаётся запасным механизмом. Повторное включение тумблера применяет куки заново; после этого переключатель темы внутри VK остаётся главным. Применение — после возврата в браузер.")
+        // 1.3.24: темы ВКонтакте из VK Next — выбор из извлечённого набора.
+        buttonRow("Тема ВКонтакте: ${VkThemes.choiceLabel(Prefs.vkThemeId)}") { showThemeDialog() }
+        hint("Темы извлечены из расширения VK Next 14.14.2 (в пакете 4 уникальные: «Светлая» — родные VKUI-токены; «Тёмная серая» и «Чёрная» — полные карты из 300 переменных: старые переменные VK для мобильной версии и токены VKUI для полной, с зеркалированием по alias-карте VK Next). Цветная тема применяется к обеим версиям сайта: переменные ставятся инлайном на <html> до загрузки страницы и перекрывают стили VK; для тёмных дополнительно включается класс тёмной VKUI-схемы. Активная цветная тема заменяет собой тумблер «Тёмная тема»: куки тёмной схемы и CSS-инверсия отключаются, чтобы VK не спорил с выбранной картой цветов. «Не менять» и «Тёмная (как в VK)» — прежнее поведение. Применение — после возврата в браузер.")
         switchRow("Скачивание медиа (фото, видео, файлы)", Prefs.extMedia) {
             Prefs.extMedia = it; Prefs.markDirty()
         }
@@ -210,7 +214,7 @@ class SettingsActivity : AppCompatActivity() {
 
         // ---------------- О программе ----------------
         header("О программе")
-        hint("PikoVK 1.3.20 — лёгкий браузер с домом на VK: расширения, мультиаккаунт, фоновые уведомления (включая личные сообщения) и воспроизведение. Единственная блокировка — реклама (расширение «Блокировка рекламы», включено по умолчанию и выключается одним тумблером), всё остальное опционально.")
+        hint("PikoVK 1.3.24 — лёгкий браузер с домом на VK: расширения (включая темы ВКонтакте из VK Next), мультиаккаунт, фоновые уведомления (включая личные сообщения) и воспроизведение. Единственная блокировка — реклама (расширение «Блокировка рекламы», включено по умолчанию и выключается одним тумблером), всё остальное опционально.")
     }
 
     // Единая логика для обоих тумблеров уведомлений (1.3.20): службу держим
@@ -259,6 +263,23 @@ class SettingsActivity : AppCompatActivity() {
         if (btn != null) {
             btn.text = batteryLabel()
         }
+    }
+
+    // 1.3.24: диалог выбора темы ВКонтакте (набор из VK Next).
+    private fun showThemeDialog() {
+        val ids = VkThemes.CHOICE_IDS
+        val labels = ids.map { VkThemes.choiceLabel(it) }.toTypedArray()
+        val idx = ids.indexOf(Prefs.vkThemeId)
+        val current = if (idx < 0) 0 else idx
+        AlertDialog.Builder(this)
+            .setTitle("Тема ВКонтакте")
+            .setSingleChoiceItems(labels, current) { d, which ->
+                Prefs.vkThemeId = ids[which]
+                d.dismiss()
+                Prefs.markDirty()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     private fun showUaDialog() {

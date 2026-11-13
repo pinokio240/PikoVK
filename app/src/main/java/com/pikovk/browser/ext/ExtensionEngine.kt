@@ -82,7 +82,7 @@ object ExtensionEngine {
         }catch(e){}
     """.trimIndent()
 
-    fun buildScript(): String {
+    fun buildScript(ctx: android.content.Context): String {
         val sb = StringBuilder()
         sb.append("(function(){'use strict';")
         sb.append("var F={dark:").append(Prefs.extDark)
@@ -94,7 +94,15 @@ object ExtensionEngine {
         // «не могу поделиться видео» — в Android WebView Web Share API
         // не реализован, VK по его отсутствию молча ломал кнопку)
         sb.append(SHARE_JS)
-        if (Prefs.extDark) sb.append(DARK_JS)
+        // Тема из VK Next (1.3.24): цветная тема перекрывает инверсию —
+        // свои настоящие цвета вместо filter:invert.
+        val themeJs = VkThemes.buildThemeJs(ctx, Prefs.vkThemeId)
+        if (themeJs.isNotEmpty()) {
+            sb.append(themeJs)
+        }
+        // Инверсия — запасной механизм тёмной темы: только когда цветная
+        // тема не выбрана (иначе она и CSS-инверсия воюют за один <html>).
+        if (Prefs.extDark && themeJs.isEmpty()) sb.append(DARK_JS)
         if (Prefs.extTweaks) sb.append(TWEAKS_JS)
         if (Prefs.extMedia) sb.append(MEDIA_JS)
         // Репортёр плеера для медиашторки (1.3.21), подмена видимости (1.3.22).

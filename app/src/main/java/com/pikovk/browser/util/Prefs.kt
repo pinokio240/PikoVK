@@ -3,6 +3,7 @@ package com.pikovk.browser.util
 import android.content.Context
 import android.content.SharedPreferences
 import com.pikovk.browser.browser.UserAgents
+import com.pikovk.browser.ext.VkThemes
 
 // Единое хранилище настроек браузера.
 //
@@ -62,6 +63,23 @@ object Prefs {
         get() = sp.getBoolean("ext_dark", true)
         set(v) {
             e().putBoolean("ext_dark", v).apply()
+        }
+
+    // ---------- Тема ВКонтакте (1.3.24, из VK Next) ----------
+    // Выбор темы из извлечённого набора VK Next (VkThemes): "" — не менять
+    // (прежнее поведение: тумблер «Тёмная тема» + куки VK), либо id цветной
+    // темы (vk_light / vk_next_gray / vk_next_black) — карта переменных
+    // перекрывает цвета обеих версий сайта, куки и инверсия отключаются.
+    // «Тёмная (как в VK)» (vk_dark_native) — ведёт себя как «Не менять»,
+    // оставлена в диалоге как явная формулировка текущего тумблера.
+    var vkThemeId: String
+        get() {
+            val stored: String? = sp.getString("vk_theme_id", VkThemes.THEME_NONE)
+            if (stored == null) return VkThemes.THEME_NONE
+            return stored
+        }
+        set(v) {
+            e().putString("vk_theme_id", v).apply()
         }
 
     var extMedia: Boolean

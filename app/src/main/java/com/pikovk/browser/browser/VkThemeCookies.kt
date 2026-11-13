@@ -2,6 +2,7 @@ package com.pikovk.browser.browser
 
 import android.util.Log
 import android.webkit.CookieManager
+import com.pikovk.browser.ext.VkThemes
 import com.pikovk.browser.profile.ProfileManager
 import com.pikovk.browser.util.Prefs
 
@@ -51,7 +52,9 @@ object VkThemeCookies {
     //   настроен): загрузка страницы не должна ждать того, чего не будет.
     fun apply(onApplied: (() -> Unit)? = null) {
         val cb = onApplied
-        if (!Prefs.extDark) {
+        // 1.3.24: цветная тема из VK Next (Prefs.vkThemeId) перекрывает куки —
+        // VK не должен рисовать свою тёмную схему поверх нашей карты цветов.
+        if (!Prefs.extDark || VkThemes.isColorTheme(Prefs.vkThemeId)) {
             if (cb != null) cb()
             return
         }
@@ -70,7 +73,8 @@ object VkThemeCookies {
     // (например, владелец стёр данные VK или хочет вернуть тёмную тему
     // после смены слота). Флаг слота обновляется, чтобы больше не повторять.
     fun reapply() {
-        if (!Prefs.extDark) return
+        // 1.3.24: при активной цветной теме куки не трогаем (см. apply).
+        if (!Prefs.extDark || VkThemes.isColorTheme(Prefs.vkThemeId)) return
         setDarkCookies {
             Prefs.setVkDarkCookiesDone(ProfileManager.activeSlot(), true)
         }

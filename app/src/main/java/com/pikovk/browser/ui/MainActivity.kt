@@ -252,7 +252,7 @@ class MainActivity : AppCompatActivity() {
         // фильтр logcat "PikoVK" покажет подсказку обновить Android System WebView.
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             WebViewCompat.addDocumentStartJavaScript(
-                wv, ExtensionEngine.buildScript(), ExtensionEngine.ALLOWED_ORIGINS
+                wv, ExtensionEngine.buildScript(this), ExtensionEngine.ALLOWED_ORIGINS
             )
         } else {
             Log.w(
@@ -659,7 +659,7 @@ class MainActivity : AppCompatActivity() {
         // шим navigator.share + расширения — в окне тоже (fail-open)
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             WebViewCompat.addDocumentStartJavaScript(
-                wv, ExtensionEngine.buildScript(), ExtensionEngine.ALLOWED_ORIGINS
+                wv, ExtensionEngine.buildScript(this), ExtensionEngine.ALLOWED_ORIGINS
             )
         }
         // Клиент окна — упрощённый: VK-редиректы/адблок живут в основном
