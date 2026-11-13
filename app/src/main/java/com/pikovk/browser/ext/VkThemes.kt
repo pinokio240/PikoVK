@@ -153,8 +153,12 @@ try{var vkbBody=document.body||document.documentElement;var vkbT=0;new MutationO
             val arr = root.getJSONArray("themes")
             for (i in 0 until arr.length()) {
                 val t = arr.getJSONObject(i)
-                val id: String? = t.optString("id", null)
-                if (id == null) continue
+                // Fallback "" вместо null: null в fallback, который новые SDK
+                // объявляют @NonNull, давал предупреждение компилятора
+                // «Type mismatch: inferred type is Nothing? but String».
+                // Пустой id в asset не встречается — проверка эквивалентна.
+                val id: String = t.optString("id", "")
+                if (id.isEmpty()) continue
                 result[id] = Pair(
                     t.optString("nativeTheme", "light") == "dark",
                     t.getJSONObject("variables")
