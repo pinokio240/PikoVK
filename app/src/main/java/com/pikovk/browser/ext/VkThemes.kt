@@ -39,7 +39,12 @@ import java.io.IOException
 // (переписывает разметку и классы), поэтому применение ПОВТОРЯЕТСЯ: на
 // DOMContentLoaded/load/pageshow, 8 отложенных свипов до 2 с, и дальше по
 // MutationObserver (атрибуты class/style на <html>; появление корней в
-// <body> — childList, с debounce 100 мс). Для тёмных тем принудительно
+// <body> — childList), оба через общий debounce 100 мс. ПРИМЕНЕНИЕ
+// ИДЕМПОТЕНТНО (1.3.26): setProperty и смена классов/colorScheme — только
+// когда значение реально отличается. Это обязательно: безусловное
+// remove+add классов само порождало мутации, за которыми следит тот же
+// наблюдатель, — цикл «применил → мутация → применил» вешал загрузку
+// страницы (репорт владельца 1.3.25). Для тёмных тем принудительно
 // выставляются VKUI-классы vkui--vkBase/vkCom/vkIOS--dark и
 // style.colorScheme: там, где наши переменные не покрывают токен, VK
 // подставит значения собственной тёмной схемы, а не светлой.
@@ -103,17 +108,19 @@ for(var r=0;r<rs.length;r++)els.push(rs[r]);
 }catch(e){}
 for(var i=0;i<els.length;i++){
 var el=els[i];if(!el||!el.style)continue;
-for(var k in TV){try{el.style.setProperty(k,TV[k],'important');}catch(e){}}
+for(var k in TV){try{if(el.style.getPropertyValue(k)!==TV[k])el.style.setProperty(k,TV[k],'important');}catch(e){}}
 }
 }catch(e){}
 try{
 var el=document.documentElement;if(!el)return;
 var dk=['vkui--vkBase--dark','vkui--vkCom--dark','vkui--vkIOS--dark'];
 var lt=['vkui--vkBase--light','vkui--vkCom--light','vkui--vkIOS--light'];
-for(var i=0;i<3;i++){el.classList.remove(dk[i]);el.classList.remove(lt[i]);}
-var cls=TD?dk:lt;
-for(var j=0;j<3;j++)el.classList.add(cls[j]);
-el.style.colorScheme=TD?'dark':'light';
+var want=TD?dk:lt,other=TD?lt:dk;
+for(var i=0;i<3;i++){
+if(el.classList.contains(other[i]))el.classList.remove(other[i]);
+if(!el.classList.contains(want[i]))el.classList.add(want[i]);
+}
+if(el.style.colorScheme!==(TD?'dark':'light'))el.style.colorScheme=TD?'dark':'light';
 }catch(e){}
 }
 vkbThemeApply();
@@ -121,8 +128,10 @@ document.addEventListener('DOMContentLoaded',vkbThemeApply);
 window.addEventListener('load',vkbThemeApply);
 window.addEventListener('pageshow',vkbThemeApply);
 for(var n=1;n<=8;n++)setTimeout(vkbThemeApply,250*n);
-try{new MutationObserver(function(){try{vkbThemeApply();}catch(e){}}).observe(document.documentElement,{attributes:true,attributeFilter:['class','style']});}catch(e){}
-try{var vkbBody=document.body||document.documentElement;var vkbT=0;new MutationObserver(function(){try{clearTimeout(vkbT);vkbT=setTimeout(function(){try{vkbThemeApply();}catch(e){}},100);}catch(e){}}).observe(vkbBody,{childList:true});}catch(e){}
+var vkbT=0;
+function vkbSoon(){try{clearTimeout(vkbT);vkbT=setTimeout(function(){try{vkbThemeApply();}catch(e){}},100);}catch(e){}}
+try{new MutationObserver(vkbSoon).observe(document.documentElement,{attributes:true,attributeFilter:['class','style']});}catch(e){}
+try{new MutationObserver(vkbSoon).observe(document.body||document.documentElement,{childList:true});}catch(e){}
 }catch(e){}"""
 
     // JS-чанк темы для ExtensionEngine.buildScript. Пустая строка — чанк не

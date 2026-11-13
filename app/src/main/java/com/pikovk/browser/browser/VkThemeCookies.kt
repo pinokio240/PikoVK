@@ -61,8 +61,18 @@ object VkThemeCookies {
         // флаг, чтобы после возврата на «Не менять» куки выставились заново.
         if (!Prefs.extDark || VkThemes.isColorTheme(Prefs.vkThemeId)) {
             if (VkThemes.isColorTheme(Prefs.vkThemeId)) {
-                clearDarkCookies {
-                    Prefs.setVkDarkCookiesDone(ProfileManager.activeSlot(), false)
+                // Снимаем ОДИН РАЗ на слот (пока куки не выставлены снова
+                // веткой «Тёмная тема» ниже): loadUrl ждёт колбэк этой
+                // записи, и очистка на каждой загрузке добавляла ожидание
+                // записи кук перед открытием каждой страницы — репорт
+                // владельца 1.3.25 «зависание при загрузке».
+                val slot = ProfileManager.activeSlot()
+                if (Prefs.vkDarkCookiesDone(slot)) {
+                    clearDarkCookies {
+                        Prefs.setVkDarkCookiesDone(slot, false)
+                        if (cb != null) cb()
+                    }
+                } else {
                     if (cb != null) cb()
                 }
             } else {
@@ -86,16 +96,18 @@ object VkThemeCookies {
     // после смены слота). Флаг слота обновляется, чтобы больше не повторять.
     fun reapply() {
         // 1.3.24/1.3.25: при активной цветной теме куки не ставим, а снимаем
-        // (см. apply) — тумблер «Тёмная тема» в этом состоянии не главный.
+        // один раз, по слот-флагу (см. apply) — тумблер «Тёмная тема» в этом
+        // состоянии не главный.
+        val slot = ProfileManager.activeSlot()
         if (VkThemes.isColorTheme(Prefs.vkThemeId)) {
-            clearDarkCookies {
-                Prefs.setVkDarkCookiesDone(ProfileManager.activeSlot(), false)
+            if (Prefs.vkDarkCookiesDone(slot)) {
+                clearDarkCookies { Prefs.setVkDarkCookiesDone(slot, false) }
             }
             return
         }
         if (!Prefs.extDark) return
         setDarkCookies {
-            Prefs.setVkDarkCookiesDone(ProfileManager.activeSlot(), true)
+            Prefs.setVkDarkCookiesDone(slot, true)
         }
     }
 
