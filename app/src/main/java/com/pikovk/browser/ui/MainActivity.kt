@@ -796,15 +796,18 @@ class MainActivity : AppCompatActivity() {
         callback: ValueCallback<Array<Uri>>,
         params: WebChromeClient.FileChooserParams
     ): Boolean {
-        // 1.3.32 (доработка-22): Photo Picker как основной путь УБРАН.
-        // Журнал владельца 19:16:17 доказал разрыв на этом звене: пикер
-        // открылся, страница и нативная часть отработали, но пикер вернул
-        // resultCode=-1 (RESULT_OK) и ПУСТОЙ результат (файлов=0) — на части
-        // прошивок шим фотопикера (GMS-less ROM, OEM-галерея) отдаёт пустой
-        // результат вместо выбранного uri. GET_CONTENT в полном виде
-        // (разрешение 1.3.29 + allowFileAccess 1.3.28) владелец ещё не
-        // тестировал — до 1.3.28 в цепочке были другие дефекты. Возвращаем
-        // GET_CONTENT как единственный путь.
+        // 1.3.35 (доработка-25): документы — ACTION_OPEN_DOCUMENT (системный
+        // DocumentsUI, компонент самой платформы) вместо ACTION_GET_CONTENT.
+        // Причина: GET_CONTENT отвечает приложение прошивки (менеджер/
+        // галерея OEM), а пикеры прошивки на устройстве владельца возвращают
+        // пустой результат — доказано журналом 1.3.31 (Photo Picker:
+        // RESULT_OK без файлов). Фото/видео с 1.3.33 идут через собственную
+        // галерею, остались документы — теперь они открывают тот же
+        // «Файлы», что и Chrome. Результат — стандартный content://
+        // с грантом; DocumentsUI нет — откат на GET_CONTENT.
+        // 1.3.32: если все accept-MIME делят один супертип — type=супертип,
+        // иначе «*/*» + EXTRA_MIME_TYPES (часть OEM-менеджеров фильтр
+        // игнорирует; DocumentsUI уважает оба варианта).
         // 1.3.27: params.createIntent() передаёт первый accept-тип в intent
         // как есть. VK шлёт accept не только MIME-ами («image/*»), но и
         // расширениями («.jpg», «.png») — не-MIME строка портит intent
@@ -815,34 +818,28 @@ class MainActivity : AppCompatActivity() {
         // setType / EXTRA_MIME_TYPES, расширения отбрасываем; SAVE-режим
         // (VK не использует) остаётся на params.createIntent().
         return try {
+            fun buildIntent(action: String): Intent = Intent(action).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                val mimes = params.acceptTypes.orEmpty()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() && !it.startsWith(".") }
+                    .distinct()
+                if (mimes.isNotEmpty()) {
+                    val prefixes = mimes.map { it.substringBefore('/') }.distinct()
+                    type = if (prefixes.size == 1) prefixes[0] + "/*" else "*/*"
+                    if (prefixes.size > 1) {
+                        putExtra(Intent.EXTRA_MIME_TYPES, mimes.toTypedArray())
+                    }
+                }
+                if (params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                }
+            }
             val intent = if (params.mode == WebChromeClient.FileChooserParams.MODE_SAVE) {
                 params.createIntent()
             } else {
-                Intent(Intent.ACTION_GET_CONTENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                    val mimes = params.acceptTypes.orEmpty()
-                        .map { it.trim() }
-                        .filter { it.isNotEmpty() && !it.startsWith(".") }
-                        .distinct()
-                    if (mimes.isNotEmpty()) {
-                        // 1.3.32: если все MIME делят один супертип (VK в
-                        // диалогах шлёт image/png,image/gif,image/jpeg,
-                        // image/webp) — ставим «image/*»: приложения
-                        // прошивки надёжнее открывают галерею по супертипу,
-                        // чем «*/*» с EXTRA_MIME_TYPES (часть из них фильтр
-                        // EXTRA_MIME_TYPES игнорирует и показывает пустой
-                        // список). Смешанный accept — «*/*» + список.
-                        val prefixes = mimes.map { it.substringBefore('/') }.distinct()
-                        type = if (prefixes.size == 1) prefixes[0] + "/*" else "*/*"
-                        if (prefixes.size > 1) {
-                            putExtra(Intent.EXTRA_MIME_TYPES, mimes.toTypedArray())
-                        }
-                    }
-                    if (params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
-                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                    }
-                }
+                buildIntent(Intent.ACTION_OPEN_DOCUMENT)
             }
             Log.i(
                 "PikoVK-Nav",
@@ -853,8 +850,14 @@ class MainActivity : AppCompatActivity() {
             // Uri, который WebView не сможет прочитать — файл выбран, а
             // страница молча не может его прикрепить.
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            DiagLog.log(this, "пикер: GET_CONTENT type=${intent.type}")
-            fileChooser.launch(intent)
+            DiagLog.log(this, "пикер: системный DocumentsUI type=${intent.type}")
+            try {
+                fileChooser.launch(intent)
+            } catch (e: ActivityNotFoundException) {
+                // DocumentsUI нет (прошивки бывают разные) — прежний путь
+                DiagLog.log(this, "DocumentsUI не найден — откат на GET_CONTENT")
+                fileChooser.launch(buildIntent(Intent.ACTION_GET_CONTENT))
+            }
             true
         } catch (e: ActivityNotFoundException) {
             Log.w("PikoVK-Nav", "file chooser: ни одного пикера на устройстве ($e)")
