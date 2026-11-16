@@ -140,6 +140,13 @@ class MainActivity : AppCompatActivity() {
                 // некому (VK останется ждать выбор). Диагностика — «PikoVK-Nav».
                 Log.w("PikoVK-Nav", "file chooser: колбэка нет (активити пересоздана?) — ответ странице не доставлен")
                 DiagLog.log(this@MainActivity, "результат пикера потерян: колбэка нет (активити пересоздана?)")
+                // 1.3.36 (доработка-26): страница перезагружена (восстановлена
+                // последняя), выбор файла нужно повторить.
+                Toast.makeText(
+                    this@MainActivity,
+                    "PikoVK: страница была перезагружена — выберите файл заново",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
 
@@ -284,7 +291,19 @@ class MainActivity : AppCompatActivity() {
             // 1.3.20: тап по уведомлению о личном сообщении несёт адрес,
             // который нужно открыть сразу (мессенджер).
             val openUrl = intent.getStringExtra(EXTRA_OPEN_URL)
-            if (openUrl != null && openUrl.isNotEmpty()) startUrl = openUrl
+            if (openUrl != null && openUrl.isNotEmpty()) {
+                startUrl = openUrl
+            } else {
+                // 1.3.36 (доработка-26): после смерти процесса в фоне
+                // (случай владельца: DocumentsUI на переднем плане, система
+                // отняла процесс — перед этим в журнале шторм «Request state
+                // reset») savedInstanceState пуст, и раньше открывался
+                // СТАРТОВЫЙ адрес — полная версия сменялась мобильной.
+                // Открываем последнюю страницу: адрес полной версии
+                // (vk.ru, open_in_web=1) держит полную версию.
+                val last = Prefs.lastPageUrl
+                if (last.isNotEmpty()) startUrl = last
+            }
         } else {
             startUrl = savedUrl
         }
@@ -1117,6 +1136,10 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         // держим снимок активного слота актуальным для мгновенного переключения
         ProfileManager.saveCurrentSession(ProfileManager.activeSlot())
+        // 1.3.36 (доработка-26): адрес последней страницы — восстановление
+        // после смерти процесса в фоне (см. onCreate / Prefs.lastPageUrl)
+        val url = webView?.url
+        if (!url.isNullOrEmpty()) Prefs.lastPageUrl = url
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
