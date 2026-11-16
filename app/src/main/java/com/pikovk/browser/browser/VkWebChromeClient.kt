@@ -7,7 +7,9 @@ import android.webkit.JsResult
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
+import android.widget.Toast
 import com.pikovk.browser.ui.MainActivity
+import com.pikovk.browser.util.DiagLog
 
 // Chrome-клиент: прогресс, диалоги confirm/alert (нужны расширению
 // «скачивание медиа»), выбор файлов (загрузка аватара и т.п.),
@@ -57,6 +59,16 @@ class VkWebChromeClient(private val activity: MainActivity) : WebChromeClient() 
             "PikoVK-Console",
             "${message.messageLevel()} ${message.sourceId()}:${message.lineNumber()} ${message.message()}"
         )
+        // 1.3.31 (доработка-21): метки [PikoVK] из DIAG_JS (ExtensionEngine) —
+        // звенья «страница открыла выбор файла» и «страница получила файлы» —
+        // пишем в журнал настроек и показываем тостом: владелец видит, где
+        // рвётся цепочка прикрепления, без adb. Остальная консоль VK — только
+        // logcat (шум страницы в журнал не попадает).
+        if (message.message().contains("[PikoVK]")) {
+            val diag = message.message().substringAfter("[PikoVK] ").trim()
+            DiagLog.log(activity, "страница: $diag")
+            Toast.makeText(activity, "PikoVK: $diag", Toast.LENGTH_SHORT).show()
+        }
         return true
     }
 

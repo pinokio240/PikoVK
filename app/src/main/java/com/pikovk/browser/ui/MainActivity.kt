@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Message
+import android.provider.MediaStore
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -54,6 +55,7 @@ import com.pikovk.browser.media.PlaybackService
 import com.pikovk.browser.media.PlaybackWakeLock
 import com.pikovk.browser.notify.NotifyService
 import com.pikovk.browser.profile.ProfileManager
+import com.pikovk.browser.util.DiagLog
 import com.pikovk.browser.util.Prefs
 
 // Главный экран: WebView + минималистичная нижняя панель.
@@ -107,14 +109,30 @@ class MainActivity : AppCompatActivity() {
             val cb = filePathCallback
             filePathCallback = null
             if (cb != null) {
-                cb.onReceiveValue(
-                    WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+                // 1.3.31 (доработка-21): в журнал и тост — владельцу видно
+                // звено «результат пикера» без adb (диагностика «не
+                // прикрепляются в диалогах»: настройки → «Диагностика
+                // прикрепления»).
+                val uris = WebChromeClient.FileChooserParams.parseResult(
+                    result.resultCode,
+                    result.data
                 )
+                DiagLog.log(
+                    this@MainActivity,
+                    "результат пикера: resultCode=${result.resultCode}, файлов=${uris?.size ?: 0}"
+                )
+                Toast.makeText(
+                    this@MainActivity,
+                    "PikoVK: выбрано файлов: ${uris?.size ?: 0}",
+                    Toast.LENGTH_SHORT
+                ).show()
+                cb.onReceiveValue(uris)
             } else {
                 // Результат пришёл после пересоздания активити: колбэк
                 // принадлежал уничтоженному WebView, доставить ответ странице
                 // некому (VK останется ждать выбор). Диагностика — «PikoVK-Nav».
                 Log.w("PikoVK-Nav", "file chooser: колбэка нет (активити пересоздана?) — ответ странице не доставлен")
+                DiagLog.log(this@MainActivity, "результат пикера потерян: колбэка нет (активити пересоздана?)")
             }
         }
 
@@ -132,6 +150,8 @@ class MainActivity : AppCompatActivity() {
     private val storagePerm =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             Log.i("PikoVK-Nav", "storage permission: granted=$granted")
+            // 1.3.31: звено журнала — виден запрос разрешения и исход.
+            DiagLog.log(this, "разрешение хранилища: granted=$granted")
             val cb = pendingChooserCallback
             val params = pendingChooserParams
             pendingChooserCallback = null
@@ -614,6 +634,14 @@ class MainActivity : AppCompatActivity() {
             "PikoVK-Nav",
             "file chooser: вызван mode=${params.mode} accept=${params.acceptTypes?.joinToString()}"
         )
+        // 1.3.31 (доработка-21): журнал + тост — владельцу видно, что
+        // страница дошла до нативного звена (если тоста нет после тапа
+        // «Прикрепить» — VK сам не открыл input, разрыв на стороне страницы).
+        DiagLog.log(
+            this,
+            "страница запросила выбор файла: mode=${params.mode} accept=${params.acceptTypes?.joinToString()}"
+        )
+        Toast.makeText(this, "PikoVK: VK открыл выбор файла", Toast.LENGTH_SHORT).show()
         val pending = filePathCallback
         if (pending != null) {
             pending.onReceiveValue(null) // предыдущий выбор отменяем
@@ -648,6 +676,45 @@ class MainActivity : AppCompatActivity() {
         callback: ValueCallback<Array<Uri>>,
         params: WebChromeClient.FileChooserParams
     ): Boolean {
+        // 1.3.31 (доработка-21): VK в диалогах шлёт media-accept
+        // («image/*,video/*»). Chrome на Android 13+ открывает для такого
+        // accept системный Photo Picker, а не файловый менеджер — повторяем:
+        // пикер не зависит от файлового менеджера прошивки (у части OEM
+        // GET_CONTENT с EXTRA_MIME_TYPES открывается пустым) и не требует
+        // разрешений на хранилище. Результат — content:// с грантом;
+        // parseResult принимает и Data, и ClipData. Пикера нет — откат
+        // на GET_CONTENT ниже, как раньше.
+        if (Build.VERSION.SDK_INT >= 33 &&
+            params.mode != WebChromeClient.FileChooserParams.MODE_SAVE
+        ) {
+            val mimes = params.acceptTypes.orEmpty()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith(".") }
+                .distinct()
+            val mediaOnly = mimes.isNotEmpty() && mimes.all {
+                it.startsWith("image/") || it.startsWith("video/")
+            }
+            if (mediaOnly) {
+                try {
+                    val pp = Intent(MediaStore.ACTION_PICK_IMAGES)
+                    if (params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        pp.putExtra(
+                            MediaStore.EXTRA_PICK_IMAGES_MAX,
+                            MediaStore.getPickImagesMaxLimit()
+                        )
+                    }
+                    Log.i("PikoVK-Nav", "file chooser: Photo Picker (media-only accept)")
+                    DiagLog.log(this, "пикер: Photo Picker (media accept: $mimes)")
+                    fileChooser.launch(pp)
+                    return true
+                } catch (e: Exception) {
+                    Log.i(
+                        "PikoVK-Nav",
+                        "file chooser: Photo Picker недоступен — откат на GET_CONTENT (${e.javaClass.simpleName})"
+                    )
+                }
+            }
+        }
         // 1.3.27: params.createIntent() передаёт первый accept-тип в intent
         // как есть. VK шлёт accept не только MIME-ами («image/*»), но и
         // расширениями («.jpg», «.png») — не-MIME строка портит intent
@@ -688,15 +755,18 @@ class MainActivity : AppCompatActivity() {
             // Uri, который WebView не сможет прочитать — файл выбран, а
             // страница молча не может его прикрепить.
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            DiagLog.log(this, "пикер: GET_CONTENT type=${intent.type}")
             fileChooser.launch(intent)
             true
         } catch (e: ActivityNotFoundException) {
             Log.w("PikoVK-Nav", "file chooser: ни одного пикера на устройстве ($e)")
+            DiagLog.log(this, "пикер не открылся: пикеров на устройстве нет (${e.javaClass.simpleName})")
             filePathCallback = null
             callback.onReceiveValue(null) // страница не должна висеть в «загрузке»
             false
         } catch (e: Exception) {
             Log.w("PikoVK-Nav", "file chooser: launch failed: $e")
+            DiagLog.log(this, "пикер не открылся: ${e.javaClass.simpleName}")
             filePathCallback = null
             callback.onReceiveValue(null) // страница не должна висеть в «загрузке»
             false

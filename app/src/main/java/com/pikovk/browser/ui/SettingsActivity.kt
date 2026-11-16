@@ -27,6 +27,7 @@ import com.pikovk.browser.media.PlaybackService
 import com.pikovk.browser.media.PlaybackWakeLock
 import com.pikovk.browser.notify.NotifyService
 import com.pikovk.browser.profile.ProfileManager
+import com.pikovk.browser.util.DiagLog
 import com.pikovk.browser.util.Prefs
 
 // Экран настроек. Всё переключается на живую: изменения, влияющие на
@@ -131,6 +132,29 @@ class SettingsActivity : AppCompatActivity() {
             Prefs.extTweaks = it; Prefs.markDirty()
         }
         hint("Применение расширений — после возврата в браузер.")
+
+        // ---------------- Диагностика прикрепления ----------------
+        // 1.3.31 (доработка-21): репорт владельца «не прикрепляются файлы
+        // в диалогах» без logcat. Журнал пишет все звенья цепочки
+        // (см. DiagLog) — владелец пробует прикрепить, открывает журнал
+        // здесь и присылает содержимое: видно точное звено разрыва.
+        header("Диагностика прикрепления")
+        buttonRow("Показать журнал") {
+            val text = DiagLog.read(this)
+            AlertDialog.Builder(this)
+                .setTitle("Журнал прикрепления")
+                .setMessage(text)
+                .setPositiveButton("Скопировать") { _, _ ->
+                    val cm = getSystemService(Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("PikoVK", text))
+                    Toast.makeText(this, "Скопировано", Toast.LENGTH_SHORT).show()
+                }
+                .setNeutralButton("Очистить") { _, _ -> DiagLog.clear(this) }
+                .setNegativeButton("Закрыть", null)
+                .show()
+        }
+        hint("Файлы не прикрепляются в диалогах? Попробуй прикрепить файл, затем вернись сюда, открой журнал и пришли его содержимое. В журнал пишутся звенья цепочки: запрос выбора страницей VK → системный пикер → результат → сколько файлов получила страница → ошибки VK.")
 
         // ---------------- Версия VK ----------------
         header("Версия VK")
