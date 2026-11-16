@@ -123,6 +123,28 @@ class MainActivity : AppCompatActivity() {
             if (granted && (Prefs.notifyEnabled || Prefs.imNotifyEnabled)) NotifyService.start(this)
         }
 
+    // 1.3.29 (доработка-19): READ_EXTERNAL_STORAGE для загрузки файлов
+    // (Android 8–12). Документация требует его наряду с INTERNET: без него
+    // сторонние пикеры, возвращающие file://, отдают файл, который WebView
+    // не может прочитать (манифест — см. AndroidManifest.xml). Запрос ленивый,
+    // один раз, при первом прикреплении; отказ не блокирует выбор —
+    // content://-результаты читаются и без разрешения.
+    private val storagePerm =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            Log.i("PikoVK-Nav", "storage permission: granted=$granted")
+            val cb = pendingChooserCallback
+            val params = pendingChooserParams
+            pendingChooserCallback = null
+            pendingChooserParams = null
+            if (cb != null && params != null) {
+                launchFileChooserNow(cb, params)
+            }
+        }
+
+    // Активность, ждущая ответа на запрос разрешения (см. startFileChooser).
+    private var pendingChooserCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingChooserParams: WebChromeClient.FileChooserParams? = null
+
     // Домашняя страница всегда соответствует положению кнопки версии:
     //  хост и User-Agent согласованы (см. updateUserAgent) — VK не гоняет
     //  нас редиректами m.vk.ru <-> vk.ru. В полной версии (1.3.13) —
@@ -597,6 +619,35 @@ class MainActivity : AppCompatActivity() {
             pending.onReceiveValue(null) // предыдущий выбор отменяем
         }
         filePathCallback = callback
+        // 1.3.29 (доработка-19): документация по загрузке файлов в WebView
+        // (TalkJS «Enable Upload Files in Your Android WebView Application»)
+        // требует READ_EXTERNAL_STORAGE наряду с INTERNET: на Android 8–12
+        // часть сторонних пикеров отдаёт file://, который без разрешения
+        // WebView не может прочитать (манифест — maxSdkVersion 32; на
+        // Android 13+ разрешение игнорируется). Запрос ленивый — при первом
+        // прикреплении; отказ не блокирует выбор (content:// читается и без
+        // него). На время запроса колбэк живёт в filePathCallback: страница
+        // VK честно ждёт, ответ придёт после пикера или отмены.
+        if (
+            Build.VERSION.SDK_INT < 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.i("PikoVK-Nav", "file chooser: запрос READ_EXTERNAL_STORAGE (Android < 13)")
+            pendingChooserCallback = callback
+            pendingChooserParams = params
+            storagePerm.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+            return true
+        }
+        return launchFileChooserNow(callback, params)
+    }
+
+    // Сборка intent и запуск системного пикера. Выделено из startFileChooser,
+    // чтобы прямой путь и путь после запроса разрешения шли через один код.
+    private fun launchFileChooserNow(
+        callback: ValueCallback<Array<Uri>>,
+        params: WebChromeClient.FileChooserParams
+    ): Boolean {
         // 1.3.27: params.createIntent() передаёт первый accept-тип в intent
         // как есть. VK шлёт accept не только MIME-ами («image/*»), но и
         // расширениями («.jpg», «.png») — не-MIME строка портит intent

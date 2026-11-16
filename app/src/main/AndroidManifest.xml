@@ -18,6 +18,20 @@
          владелец кнопкой; нужно, чтобы Doze не приостанавливал сеть в момент
          подгрузки следующего трека, пока экран погашен -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 1.3.29 (доработка-19): загрузка файлов из WebView (прикреп фото и
+         документов в VK). Требование документации: TalkJS «Enable Upload
+         Files in Your Android WebView Application» — приложению нужны
+         INTERNET и READ_EXTERNAL_STORAGE; developer.android.com «WebViews –
+         Unsafe File Inclusion» — отключать file-доступ стоит только если
+         приложение НЕ использует file:// и content://. Пикеры отдают
+         content://, но часть сторонних галерей/файл-менеджеров на
+         Android 8–12 возвращает file://, который WebView без этого
+         разрешения не может прочитать — файл выбран, а прикрепление молча
+         не проходит. На Android 13+ разрешение системой игнорируется
+         (photo picker и DocumentsUI возвращают content:// с грантом). -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:name=".App"
