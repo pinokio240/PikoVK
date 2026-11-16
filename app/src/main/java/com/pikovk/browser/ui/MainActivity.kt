@@ -706,6 +706,14 @@ class MainActivity : AppCompatActivity() {
         ) {
             return launchMediaGallery(callback, params)
         }
+        // 1.3.38 (доработка-27): документы и прочее (accept=*/*, пусто) —
+        // собственный диалог файлов (FilesDialog) в обход сломанного на
+        // устройстве владельца DocumentsUI. Внутри диалога кнопка «Другие
+        // файлы…» открывает тот же DocumentsUI уже из стабильного состояния —
+        // потеря колбэка при пересоздании активити почти исключена.
+        if (params.mode != WebChromeClient.FileChooserParams.MODE_SAVE) {
+            return launchFilesDialog(callback, params)
+        }
         // 1.3.29 (доработка-19): документация по загрузке файлов в WebView
         // (TalkJS «Enable Upload Files in Your Android WebView Application»)
         // требует READ_EXTERNAL_STORAGE наряду с INTERNET: на Android 8–12
@@ -807,6 +815,43 @@ class MainActivity : AppCompatActivity() {
                 callback.onReceiveValue(null)
             }
         }
+    }
+
+    // 1.3.38 (доработка-27): собственный диалог файлов (документы/прочее) —
+    // полностью внутри активити, как MediaGalleryDialog для фото. Список файлов
+    // строится напрямую по ФС, выбранные отдаются странице как content:// через
+    // FileProvider. Канал «результат активити» (в котором системные пикеры
+    // теряли результат при пересоздании) не используется вовсе. Кнопка
+    // «Другие файлы…» — запасной путь к произвольным файлам через DocumentsUI:
+    // пересоздание активити происходит уже ПОСЛЕ закрытия диалога, поэтому
+    // старый filePathCallback умирает вместе со старым WebView и не ломается.
+    private fun launchFilesDialog(
+        callback: ValueCallback<Array<Uri>>,
+        params: WebChromeClient.FileChooserParams
+    ): Boolean {
+        val multiple = params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+        DiagLog.log(this, "файлы — собственный диалог (в обход системного пикера)")
+        FilesDialog.show(this, multiple) { choice ->
+            when {
+                choice != null -> {
+                    filePathCallback = null
+                    DiagLog.log(this, "файлы: передано странице ${choice.size} файлов")
+                    Toast.makeText(
+                        this,
+                        "PikoVK: прикреплено файлов: ${choice.size}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    callback.onReceiveValue(choice)
+                }
+                // Диалог закрыт «Другие файлы…» или файлов не нашлось — открыть
+                // системный DocumentsUI как запасной полноценный путь.
+                else -> {
+                    filePathCallback = callback
+                    launchFileChooserNow(callback, params)
+                }
+            }
+        }
+        return true
     }
 
     // Сборка intent и запуск системного пикера. Выделено из startFileChooser,

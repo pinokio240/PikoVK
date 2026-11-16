@@ -52,6 +52,20 @@
         android:theme="@style/Theme.PikoVK"
         android:usesCleartextTraffic="false">
 
+        <!-- 1.3.38 (доработка-27): FileProvider для собственного диалога файлов.
+             Список файлов строится напрямую, а выбранные отдаются странице как
+             content:// (file:// WebView на Android 12+ не всегда может прочитать).
+             Пути — app/src/main/res/xml/file_paths.xml. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.filesProvider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
