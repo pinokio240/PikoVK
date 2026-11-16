@@ -82,6 +82,47 @@ object ExtensionEngine {
         }catch(e){}
     """.trimIndent()
 
+    // ------------------------------------------------------------------
+    // 1.3.30 (доработка-20). Диагностика прикрепления файлов. Репорт
+    // владельца «файлы не прикрепляются» не даёт признака, ГДЕ рвётся
+    // цепочка: (1) страница вызывает input[type=file].click() → (2) WebView
+    // поднимает onShowFileChooser → системный пикер → (3) результат →
+    // (4) страница читает файл и грузит на upload-сервер. Нативная часть
+    // (2)-(3) логируется тегом «PikoVK-Nav» (startFileChooser); здесь —
+    // звенья (1) и (4): обёртка вокруг HTMLInputElement.prototype.click
+    // печатает вызовы file-input (accept/multiple), capture-listener на
+    // change печатает, сколько файлов страница ПОЛУЧИЛА. Всё через
+    // console.log → logcat «PikoVK-Console» (VkWebChromeClient
+    // .onConsoleMessage). Поведение страницы не меняем, fail-open.
+    // Без '$' и шаблонных строк, только // -комментарии.
+    // ------------------------------------------------------------------
+    private val DIAG_JS = """
+        try{
+          var nativeInputClick = HTMLInputElement.prototype.click;
+          HTMLInputElement.prototype.click = function(){
+            try{
+              if (this.type === 'file'){
+                console.log('[PikoVK] file input click: accept=' + (this.accept || '(нет)') +
+                  ' multiple=' + (this.multiple ? 1 : 0) +
+                  ' capture=' + (this.getAttribute('capture') || '(нет)'));
+              }
+            }catch(e){}
+            return nativeInputClick.apply(this, arguments);
+          };
+        }catch(e){}
+        try{
+          document.addEventListener('change', function(ev){
+            try{
+              var t = ev.target;
+              if (t && t.type === 'file'){
+                console.log('[PikoVK] file input change: файлов=' +
+                  (t.files ? t.files.length : -1));
+              }
+            }catch(e){}
+          }, true);
+        }catch(e){}
+    """.trimIndent()
+
     fun buildScript(ctx: android.content.Context): String {
         val sb = StringBuilder()
         sb.append("(function(){'use strict';")
@@ -94,6 +135,10 @@ object ExtensionEngine {
         // «не могу поделиться видео» — в Android WebView Web Share API
         // не реализован, VK по его отсутствию молча ломал кнопку)
         sb.append(SHARE_JS)
+        // Диагностика прикрепления файлов (1.3.30, доработка-20) — всегда:
+        // без неё не видно, доходит ли тап VK до input[type=file] и получает
+        // ли страница результат выбора. console.log → «PikoVK-Console».
+        sb.append(DIAG_JS)
         // Тема из VK Next (1.3.24): цветная тема перекрывает инверсию —
         // свои настоящие цвета вместо filter:invert.
         val themeJs = VkThemes.buildThemeJs(ctx, Prefs.vkThemeId)

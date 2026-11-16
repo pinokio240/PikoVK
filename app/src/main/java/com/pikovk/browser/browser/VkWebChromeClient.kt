@@ -45,6 +45,21 @@ class VkWebChromeClient(private val activity: MainActivity) : WebChromeClient() 
         params: WebChromeClient.FileChooserParams
     ): Boolean = activity.startFileChooser(callback, params)
 
+    // 1.3.30 (доработка-20): консоль страницы в logcat — диагностика
+    // прикрепления файлов. Ошибки JS VK и загрузки на upload-сервер раньше
+    // шли в общий «chromium»-поток и терялись среди шума; теперь они видны
+    // по фильтру «PikoVK-Console», рядом с метками [PikoVK] из DIAG_JS
+    // (ExtensionEngine): клик по file-input и число файлов, полученных
+    // страницей. Возврат true — сообщение обработано, поведение страницы
+    // не меняется.
+    override fun onConsoleMessage(message: android.webkit.ConsoleMessage): Boolean {
+        android.util.Log.i(
+            "PikoVK-Console",
+            "${message.messageLevel()} ${message.sourceId()}:${message.lineNumber()} ${message.message()}"
+        )
+        return true
+    }
+
     override fun onPermissionRequest(request: PermissionRequest) {
         request.deny()
     }
