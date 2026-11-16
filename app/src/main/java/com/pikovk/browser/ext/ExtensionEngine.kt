@@ -121,6 +121,51 @@ object ExtensionEngine {
             }catch(e){}
           }, true);
         }catch(e){}
+        try{
+          // 1.3.34 (доработка-24): сетевые сбои страницы — в журнал. После
+          // «file input change» файлы читает и грузит сам VK (fetch/XHR на
+          // upload-сервер): если прикрепление не появляется в чате — теперь
+          // видно, какой запрос упал и с каким статусом. Query-строку
+          // (токены) не логируем — только схема/хост/путь.
+          var of = window.fetch;
+          if (of){
+            window.fetch = function(input, init){
+              var url = (typeof input === 'string') ? input : ((input && input.url) || '?');
+              var m = (init && init.method) || (input && input.method) || 'GET';
+              return of.apply(this, arguments).then(function(r){
+                if (r && r.status >= 400){
+                  console.log('[PikoVK] fetch ' + m + ' ' + String(url).split('?')[0] + ' -> HTTP ' + r.status);
+                }
+                return r;
+              }, function(e){
+                console.log('[PikoVK] fetch fail ' + m + ' ' + String(url).split('?')[0] + ': ' + (e && e.message || e));
+                throw e;
+              });
+            };
+          }
+        }catch(e){}
+        try{
+          var ox = XMLHttpRequest.prototype.open;
+          var os = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(m, u){
+            try{ this.__pikoM = m; this.__pikoU = String(u).split('?')[0]; }catch(e){}
+            return ox.apply(this, arguments);
+          };
+          XMLHttpRequest.prototype.send = function(){
+            var self = this;
+            try{
+              this.addEventListener('error', function(){
+                console.log('[PikoVK] xhr fail ' + (self.__pikoM || '?') + ' ' + (self.__pikoU || '?'));
+              });
+              this.addEventListener('load', function(){
+                if (self.status >= 400){
+                  console.log('[PikoVK] xhr ' + (self.__pikoM || '?') + ' ' + (self.__pikoU || '?') + ' -> HTTP ' + self.status);
+                }
+              });
+            }catch(e){}
+            return os.apply(this, arguments);
+          };
+        }catch(e){}
     """.trimIndent()
 
     fun buildScript(ctx: android.content.Context): String {

@@ -69,6 +69,13 @@ class VkWebChromeClient(private val activity: MainActivity) : WebChromeClient() 
             DiagLog.log(activity, "страница: $diag")
             Toast.makeText(activity, "PikoVK: $diag", Toast.LENGTH_SHORT).show()
         }
+        // 1.3.34 (доработка-24): ошибки JS самой страницы — в журнал. После
+        // передачи файлов в input грузит их сам VK: если его скрипт падает
+        // (upload-стадия), это видно только по ошибкам консоли. Обрезаем до
+        // 200 символов — журнал не должен раздуваться шумом.
+        if (message.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR) {
+            DiagLog.log(activity, "ошибка страницы: ${message.message().take(200)}")
+        }
         return true
     }
 
