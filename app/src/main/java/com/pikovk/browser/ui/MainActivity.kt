@@ -172,6 +172,29 @@ class MainActivity : AppCompatActivity() {
     private var pendingChooserCallback: ValueCallback<Array<Uri>>? = null
     private var pendingChooserParams: WebChromeClient.FileChooserParams? = null
 
+    // 1.3.33 (доработка-23): разрешения собственной галереи (MediaStore) и
+    // отложенный колбэк на время решения владельца о запросе. Отказ —
+    // не блокирует прикрепление: системный пикер остаётся запасным.
+    private var pendingMediaCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingMediaParams: WebChromeClient.FileChooserParams? = null
+
+    private val mediaPerm =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+            DiagLog.log(this, "галерея: разрешения $grants")
+            val cb = pendingMediaCallback
+            val params = pendingMediaParams
+            pendingMediaCallback = null
+            pendingMediaParams = null
+            if (cb != null && params != null) {
+                if (grants.values.any { it }) {
+                    showMediaGalleryNow(cb, params)
+                } else {
+                    DiagLog.log(this, "галерея: разрешений нет — системный пикер")
+                    launchFileChooserNow(cb, params)
+                }
+            }
+        }
+
     // Домашняя страница всегда соответствует положению кнопки версии:
     //  хост и User-Agent согласованы (см. updateUserAgent) — VK не гоняет
     //  нас редиректами m.vk.ru <-> vk.ru. В полной версии (1.3.13) —
@@ -654,6 +677,16 @@ class MainActivity : AppCompatActivity() {
             pending.onReceiveValue(null) // предыдущий выбор отменяем
         }
         filePathCallback = callback
+        // 1.3.33 (доработка-23): фото/видео — собственная галерея в обход
+        // системных пикеров: журнал показал, что пикеры прошивки возвращают
+        // пустой результат (RESULT_OK без файлов). MediaStore → напрямую
+        // в страницу, без канала «результат активити» вовсе.
+        if (
+            params.mode != WebChromeClient.FileChooserParams.MODE_SAVE &&
+            isMediaOnlyAccept(params)
+        ) {
+            return launchMediaGallery(callback, params)
+        }
         // 1.3.29 (доработка-19): документация по загрузке файлов в WebView
         // (TalkJS «Enable Upload Files in Your Android WebView Application»)
         // требует READ_EXTERNAL_STORAGE наряду с INTERNET: на Android 8–12
@@ -675,6 +708,86 @@ class MainActivity : AppCompatActivity() {
             return true
         }
         return launchFileChooserNow(callback, params)
+    }
+
+    // 1.3.33 (доработка-23): весь accept — медиа (фото/видео)? VK в диалогах
+    // шлёт image/png,image/gif,image/jpeg,image/webp.
+    private fun isMediaOnlyAccept(params: WebChromeClient.FileChooserParams): Boolean {
+        val mimes = params.acceptTypes.orEmpty()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith(".") }
+            .distinct()
+        return mimes.isNotEmpty() && mimes.all {
+            it.startsWith("image/") || it.startsWith("video/")
+        }
+    }
+
+    // Собственная галерея вместо системного пикера: разрешения запрашиваются
+    // лениво, при отказе — системный пикер как запасной путь.
+    private fun launchMediaGallery(
+        callback: ValueCallback<Array<Uri>>,
+        params: WebChromeClient.FileChooserParams
+    ): Boolean {
+        DiagLog.log(this, "медиа — собственная галерея (в обход системного пикера)")
+        val accept = params.acceptTypes.orEmpty().map { it.trim() }
+        val need = ArrayList<String>()
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (accept.any { it.startsWith("image/") }) {
+                need += Manifest.permission.READ_MEDIA_IMAGES
+            }
+            if (accept.any { it.startsWith("video/") }) {
+                need += Manifest.permission.READ_MEDIA_VIDEO
+            }
+            if (Build.VERSION.SDK_INT >= 34) {
+                need += Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+            }
+        } else {
+            need += Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        val missing = need.distinct().filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        return if (missing.isEmpty()) {
+            showMediaGalleryNow(callback, params)
+            true
+        } else {
+            DiagLog.log(this, "галерея: запрос разрешений $missing")
+            pendingMediaCallback = callback
+            pendingMediaParams = params
+            mediaPerm.launch(missing.toTypedArray())
+            true
+        }
+    }
+
+    private fun showMediaGalleryNow(
+        callback: ValueCallback<Array<Uri>>,
+        params: WebChromeClient.FileChooserParams
+    ) {
+        val accept = params.acceptTypes.orEmpty().map { it.trim() }
+        MediaGalleryDialog.show(
+            this,
+            images = accept.any { it.startsWith("image/") },
+            videos = accept.any { it.startsWith("video/") },
+            multiple = params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+        ) { choice, emptyLibrary ->
+            if (choice != null) {
+                filePathCallback = null
+                DiagLog.log(this, "галерея: передано странице ${choice.size} файлов")
+                Toast.makeText(
+                    this,
+                    "PikoVK: прикреплено файлов: ${choice.size}",
+                    Toast.LENGTH_SHORT
+                ).show()
+                callback.onReceiveValue(choice)
+            } else if (emptyLibrary) {
+                DiagLog.log(this, "галерея: библиотека пуста — системный пикер")
+                launchFileChooserNow(callback, params)
+            } else {
+                filePathCallback = null
+                DiagLog.log(this, "галерея: отменено владельцем")
+                callback.onReceiveValue(null)
+            }
+        }
     }
 
     // Сборка intent и запуск системного пикера. Выделено из startFileChooser,

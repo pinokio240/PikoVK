@@ -32,6 +32,16 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!-- 1.3.33 (доработка-23): собственная галерея фото/видео — прямой
+         запрос MediaStore (системные пикеры на устройстве владельца
+         возвращали пустой результат). На Android 13+ — гранулярные
+         медиа-разрешения (для прямого запроса photo picker permission
+         не подходит); на 14+ частичное выделение («Выбрать фото»)
+         даёт READ_MEDIA_VISUAL_USER_SELECTED — галерея покажет только
+         выбранные владельцем файлы. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
 
     <application
         android:name=".App"
