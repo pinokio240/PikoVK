@@ -2,6 +2,7 @@ package com.pikovk.browser.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -99,12 +100,21 @@ class MainActivity : AppCompatActivity() {
 
     private val fileChooser =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            Log.i(
+                "PikoVK-Nav",
+                "file chooser: результат resultCode=${result.resultCode} hasData=${result.data != null}"
+            )
             val cb = filePathCallback
             filePathCallback = null
             if (cb != null) {
                 cb.onReceiveValue(
                     WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
                 )
+            } else {
+                // Результат пришёл после пересоздания активити: колбэк
+                // принадлежал уничтоженному WebView, доставить ответ странице
+                // некому (VK останется ждать выбор). Диагностика — «PikoVK-Nav».
+                Log.w("PikoVK-Nav", "file chooser: колбэка нет (активити пересоздана?) — ответ странице не доставлен")
             }
         }
 
@@ -566,16 +576,62 @@ class MainActivity : AppCompatActivity() {
         callback: ValueCallback<Array<Uri>>,
         params: WebChromeClient.FileChooserParams
     ): Boolean {
+        Log.i(
+            "PikoVK-Nav",
+            "file chooser: вызван mode=${params.mode} accept=${params.acceptTypes?.joinToString()}"
+        )
         val pending = filePathCallback
         if (pending != null) {
             pending.onReceiveValue(null) // предыдущий выбор отменяем
         }
         filePathCallback = callback
+        // 1.3.27: params.createIntent() передаёт первый accept-тип в intent
+        // как есть. VK шлёт accept не только MIME-ами («image/*»), но и
+        // расширениями («.jpg», «.png») — не-MIME строка портит intent
+        // (в зависимости от версии WebView: IllegalArgumentException в
+        // setType либо type=null): resolver пикера не находит, launch падает
+        // ActivityNotFoundException, и раньше catch глотал это молча — выбор
+        // файла вообще не открывался. Собираем intent сами: MIME — в
+        // setType / EXTRA_MIME_TYPES, расширения отбрасываем; SAVE-режим
+        // (VK не использует) остаётся на params.createIntent().
         return try {
-            fileChooser.launch(params.createIntent())
+            val intent = if (params.mode == WebChromeClient.FileChooserParams.MODE_SAVE) {
+                params.createIntent()
+            } else {
+                Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    val mimes = params.acceptTypes.orEmpty()
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() && !it.startsWith(".") }
+                        .distinct()
+                    if (mimes.isNotEmpty()) {
+                        type = if (mimes.size == 1) mimes[0] else "*/*"
+                        if (mimes.size > 1) {
+                            putExtra(Intent.EXTRA_MIME_TYPES, mimes.toTypedArray())
+                        }
+                    }
+                    if (params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    }
+                }
+            }
+            Log.i(
+                "PikoVK-Nav",
+                "file chooser: launch type=${intent.type} " +
+                    "multiple=${intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)}"
+            )
+            fileChooser.launch(intent)
             true
-        } catch (_: Exception) {
+        } catch (e: ActivityNotFoundException) {
+            Log.w("PikoVK-Nav", "file chooser: ни одного пикера на устройстве ($e)")
             filePathCallback = null
+            callback.onReceiveValue(null) // страница не должна висеть в «загрузке»
+            false
+        } catch (e: Exception) {
+            Log.w("PikoVK-Nav", "file chooser: launch failed: $e")
+            filePathCallback = null
+            callback.onReceiveValue(null) // страница не должна висеть в «загрузке»
             false
         }
     }
