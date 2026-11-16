@@ -621,6 +621,10 @@ class MainActivity : AppCompatActivity() {
                 "file chooser: launch type=${intent.type} " +
                     "multiple=${intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)}"
             )
+            // Грант на чтение результата: без него часть пикеров возвращает
+            // Uri, который WebView не сможет прочитать — файл выбран, а
+            // страница молча не может его прикрепить.
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             fileChooser.launch(intent)
             true
         } catch (e: ActivityNotFoundException) {
