@@ -364,9 +364,21 @@ class MainActivity : AppCompatActivity() {
         // renderedPriorityRaised=true поднимает приоритет, когда WebView виден.
         // minSdk 26 — метод доступен без проверок версии.
         wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
-        s.allowFileAccess = false
-        s.allowContentAccess = false
-        s.javaScriptCanOpenWindowsAutomatically = false
+        // 1.3.28: result file chooser — почти всегда content:// (DocumentsUI,
+        // фото-пикер, галереи), часть пикеров отдаёт file://. Раньше оба
+        // доступа были выключены (без комментария — наследие раннего
+        // «безопасного» набора): chooser открывался, файл выбирался, но
+        // WebView не мог ПРОЧИТАТЬ выбранный Uri — прикрепление молча
+        // не проходило («выбрал файл — ничего не происходит»). Это значение
+        // по умолчанию самого WebView (как в Chrome): страница VK читает
+        // только то, что сама выбрала через штатный file chooser.
+        s.allowFileAccess = true
+        s.allowContentAccess = true
+        // Наследие 1.3.22: эта строка стояла ПОСЛЕ включения 1.3.23 и
+        // пере-отключала javaScriptCanOpenWindowsAutomatically — окна
+        // window.open (share.php, диалоги target=_blank) молча умирали
+        // даже после «фикса 1.3.23». Строка удалена, действует флаг 1.3.23
+        // (javaScriptCanOpenWindowsAutomatically = true выше).
         s.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         updateUserAgent(wv)
     }
