@@ -113,13 +113,20 @@ class MainActivity : AppCompatActivity() {
                 // звено «результат пикера» без adb (диагностика «не
                 // прикрепляются в диалогах»: настройки → «Диагностика
                 // прикрепления»).
+                val data = result.data
                 val uris = WebChromeClient.FileChooserParams.parseResult(
                     result.resultCode,
-                    result.data
+                    data
                 )
+                // 1.3.32 (доработка-22): журнал различает «пикер вернул
+                // пустой результат» (hasData=false) и «пикер вернул uri» —
+                // по журналу владельца видно, чей это дефект.
+                val clip = data?.clipData
                 DiagLog.log(
                     this@MainActivity,
-                    "результат пикера: resultCode=${result.resultCode}, файлов=${uris?.size ?: 0}"
+                    "результат пикера: resultCode=${result.resultCode}, hasData=${data != null}, " +
+                        "clipItems=${clip?.itemCount ?: 0}, dataUri=${data?.data ?: "(нет)"} → " +
+                        "странице передано файлов=${uris?.size ?: 0}"
                 )
                 Toast.makeText(
                     this@MainActivity,
@@ -676,45 +683,15 @@ class MainActivity : AppCompatActivity() {
         callback: ValueCallback<Array<Uri>>,
         params: WebChromeClient.FileChooserParams
     ): Boolean {
-        // 1.3.31 (доработка-21): VK в диалогах шлёт media-accept
-        // («image/*,video/*»). Chrome на Android 13+ открывает для такого
-        // accept системный Photo Picker, а не файловый менеджер — повторяем:
-        // пикер не зависит от файлового менеджера прошивки (у части OEM
-        // GET_CONTENT с EXTRA_MIME_TYPES открывается пустым) и не требует
-        // разрешений на хранилище. Результат — content:// с грантом;
-        // parseResult принимает и Data, и ClipData. Пикера нет — откат
-        // на GET_CONTENT ниже, как раньше.
-        if (Build.VERSION.SDK_INT >= 33 &&
-            params.mode != WebChromeClient.FileChooserParams.MODE_SAVE
-        ) {
-            val mimes = params.acceptTypes.orEmpty()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && !it.startsWith(".") }
-                .distinct()
-            val mediaOnly = mimes.isNotEmpty() && mimes.all {
-                it.startsWith("image/") || it.startsWith("video/")
-            }
-            if (mediaOnly) {
-                try {
-                    val pp = Intent(MediaStore.ACTION_PICK_IMAGES)
-                    if (params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
-                        pp.putExtra(
-                            MediaStore.EXTRA_PICK_IMAGES_MAX,
-                            MediaStore.getPickImagesMaxLimit()
-                        )
-                    }
-                    Log.i("PikoVK-Nav", "file chooser: Photo Picker (media-only accept)")
-                    DiagLog.log(this, "пикер: Photo Picker (media accept: $mimes)")
-                    fileChooser.launch(pp)
-                    return true
-                } catch (e: Exception) {
-                    Log.i(
-                        "PikoVK-Nav",
-                        "file chooser: Photo Picker недоступен — откат на GET_CONTENT (${e.javaClass.simpleName})"
-                    )
-                }
-            }
-        }
+        // 1.3.32 (доработка-22): Photo Picker как основной путь УБРАН.
+        // Журнал владельца 19:16:17 доказал разрыв на этом звене: пикер
+        // открылся, страница и нативная часть отработали, но пикер вернул
+        // resultCode=-1 (RESULT_OK) и ПУСТОЙ результат (файлов=0) — на части
+        // прошивок шим фотопикера (GMS-less ROM, OEM-галерея) отдаёт пустой
+        // результат вместо выбранного uri. GET_CONTENT в полном виде
+        // (разрешение 1.3.29 + allowFileAccess 1.3.28) владелец ещё не
+        // тестировал — до 1.3.28 в цепочке были другие дефекты. Возвращаем
+        // GET_CONTENT как единственный путь.
         // 1.3.27: params.createIntent() передаёт первый accept-тип в intent
         // как есть. VK шлёт accept не только MIME-ами («image/*»), но и
         // расширениями («.jpg», «.png») — не-MIME строка портит intent
@@ -736,8 +713,16 @@ class MainActivity : AppCompatActivity() {
                         .filter { it.isNotEmpty() && !it.startsWith(".") }
                         .distinct()
                     if (mimes.isNotEmpty()) {
-                        type = if (mimes.size == 1) mimes[0] else "*/*"
-                        if (mimes.size > 1) {
+                        // 1.3.32: если все MIME делят один супертип (VK в
+                        // диалогах шлёт image/png,image/gif,image/jpeg,
+                        // image/webp) — ставим «image/*»: приложения
+                        // прошивки надёжнее открывают галерею по супертипу,
+                        // чем «*/*» с EXTRA_MIME_TYPES (часть из них фильтр
+                        // EXTRA_MIME_TYPES игнорирует и показывает пустой
+                        // список). Смешанный accept — «*/*» + список.
+                        val prefixes = mimes.map { it.substringBefore('/') }.distinct()
+                        type = if (prefixes.size == 1) prefixes[0] + "/*" else "*/*"
+                        if (prefixes.size > 1) {
                             putExtra(Intent.EXTRA_MIME_TYPES, mimes.toTypedArray())
                         }
                     }
