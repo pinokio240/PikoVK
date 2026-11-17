@@ -36,6 +36,16 @@ import kotlin.concurrent.thread
 // меняет, поэтому парсеры эвристические. URL-кандидаты и регулярки вынесены
 // в константы — их легко поправить. Запрашивается ТОЛЬКО собственная
 // сессия пользователя, ничего не собирается.
+//
+// 1.3.39 (доработка-28): текст уведомлений больше не берётся «как есть»
+// из сырого окна ±250. HTML-сущности раскрываются полностью (именованные
+// и числовые, с повторными проходами против двойных сущностей), блоки
+// <script>/<style> удаляются вместе с телом до снятия тегов; у «Ответов»
+// текст сначала ищется СТРУКТУРНО — в JSON-полях рядом с id записи, —
+// и только потом берётся окно-фоллбэк, из которого вычищаются служебные
+// слова и тайм-штампы страницы («Ответить», «Подписаться», «Сейчас»,
+// «2 ч назад» и т.п.). Оформление — как у мобильных браузеров: источник
+// «vk.ru» под телом, категория SOCIAL, приоритет DEFAULT.
 class NotifyService : Service() {
 
     @Volatile private var running = false
@@ -143,20 +153,170 @@ class NotifyService : Service() {
         }
     }
 
+    // ---------- 1.3.39 (доработка-28): добыча ЧИСТОГО текста ----------
+
+    // 1.3.39 (доработка-28): текст уведомления «Ответов». Сначала СТРУКТУРНО:
+    // JSON-поля text/title/desc/body/summary в окне вокруг id записи
+    // (значение — JSON-строка). Структурные поля не дали результата —
+    // фоллбэк: прежнее окно ±250, но уже через cleanWindow и вычистку
+    // NOISE (служебные слова, тайм-штампы). Короче 10 символов после
+    // чистки — null, не показываем (как раньше).
     private fun snippetFor(id: String, body: String): String? {
         val idx = body.indexOf(id)
         if (idx < 0) return null
-        val from = maxOf(0, idx - 250)
-        val to = minOf(body.length, idx + 250)
-        val s = body.substring(from, to)
-            .replace(Regex("<[^>]+>"), " ")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-        return if (s.length < 10) null else s
+        for (p in JSON_TEXT_PATTERNS) {
+            val from = maxOf(0, idx - JSON_TEXT_WINDOW)
+            val to = minOf(body.length, idx + JSON_TEXT_WINDOW)
+            val seg = body.substring(from, to)
+            val m = nearestIn(p, seg, idx - from) ?: continue
+            var raw = m.groupValues[1]
+            if (raw.contains('\\')) raw = jsonUnescape(raw)
+            val text = cleanText(raw)
+            if (text.length >= 10) return text
+            // короткое/мусорное поле — пробуем следующий паттерн, затем окно
+        }
+        val wFrom = maxOf(0, idx - SNIPPET_WINDOW)
+        val wTo = minOf(body.length, idx + SNIPPET_WINDOW)
+        val cleaned = cleanNoise(cleanWindow(body, wFrom, wTo))
+        return if (cleaned.length < 10) null else cleaned
+    }
+
+    // 1.3.39 (доработка-28): вычистка NOISE из окна-фоллбэка — на границах
+    // слов. Lookaround вместо \b: в Java-регулярках кириллица по умолчанию
+    // не «словесный» символ, и \b вокруг русских слов не срабатывает.
+    // После удаления склеиваем пробелы и «висячую» пунктуацию.
+    private fun cleanNoise(s: String): String {
+        var t = NOISE.replace(s, " ")
+        t = WHITESPACE.replace(t, " ").trim()
+        t = HANGING_PUNCT.replace(t) { m -> m.groupValues[1] }
+        return t.trim()
+    }
+
+    // 1.3.39 (доработка-28): окно сырого HTML → чистый текст. Сначала
+    // <script>/<style> убираются ВМЕСТЕ С СОДЕРЖИМЫМ (иначе JS/CSS попадали
+    // в «текст» уведомления), и только потом снимаются теги, раскрываются
+    // сущности, схлопываются пробелы.
+    private fun cleanWindow(body: String, from: Int, to: Int): String {
+        var s = body.substring(from, to)
+        s = SCRIPT_BLOCK.replace(s, " ")
+        s = STYLE_BLOCK.replace(s, " ")
+        s = TAGS.replace(s, " ")
+        s = htmlUnescape(s)
+        return WHITESPACE.replace(s, " ").trim()
+    }
+
+    // 1.3.39 (доработка-28): финальная чистка добытого значения — снять
+    // теги (JSON-значения могут содержать <b> и т.п.), раскрыть сущности,
+    // схлопнуть пробелы.
+    private fun cleanText(s: String): String {
+        var t = TAGS.replace(s, " ")
+        t = htmlUnescape(t)
+        return WHITESPACE.replace(t, " ").trim()
+    }
+
+    // 1.3.39 (доработка-28): раскрытие ВСЕХ распространённых HTML-сущностей —
+    // именованных и числовых (&#NNN; / &#xHHH;). До 3 проходов, чтобы
+    // «съедать» двойные сущности: «&amp;amp;» → «&amp;» → «&». Ограничение
+    // числа проходов — страховка от вечного цикла на мусорной строке.
+    private fun htmlUnescape(s: String): String {
+        var out = s
+        repeat(3) {
+            val next = ENTITY_RE.replace(out) { m -> decodeEntity(m.value) ?: m.value }
+            if (next == out) return out // нечего декодировать — выходим раньше
+            out = next
+        }
+        return out
+    }
+
+    // 1.3.39 (доработка-28): одна сущность «&…;» → символ(ы). Числовые
+    // (десятичные и шестнадцатеричные) и именованные из таблицы; неизвестное
+    // возвращается как есть (null = без замены).
+    private fun decodeEntity(e: String): String? {
+        if (e.startsWith("&#") && e.endsWith(";")) {
+            val hex = e.length > 4 && (e[2] == 'x' || e[2] == 'X')
+            val digits = e.substring(if (hex) 3 else 2, e.length - 1)
+            val cp = if (hex) digits.toIntOrNull(16) else digits.toIntOrNull(10)
+            if (cp == null || cp > 0x10FFFF || cp in 0xD800..0xDFFF) return null
+            // управляющие символы (кроме \t \n \r) → пробел, а не невидимый мусор
+            if (cp < 0x20 && cp != 9 && cp != 10 && cp != 13) return " "
+            return try {
+                String(Character.toChars(cp))
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return NAMED_ENTITIES[e]
+    }
+
+    // 1.3.39 (доработка-28): JSON-раскавычка значения из JSON-состояния:
+    // \n/\r/\t → пробел, \" → ", \\ → \, \uXXXX → символ (суррогатные пары
+    // сшиваются в один символ — эмодзи в текстах обычное дело).
+    private fun jsonUnescape(s: String): String {
+        if (!s.contains('\\')) return s // экранирования нет — быстрее выйти
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c != '\\') {
+                sb.append(c)
+                i++
+                continue
+            }
+            if (i + 1 >= s.length) {
+                sb.append(c) // «\» в самом конце — мусор, оставляем
+                break
+            }
+            when (s[i + 1]) {
+                'n', 'r', 't' -> { sb.append(' '); i += 2 } // переводы строки — в пробел
+                '"' -> { sb.append('"'); i += 2 }
+                '\\' -> { sb.append('\\'); i += 2 }
+                '/' -> { sb.append('/'); i += 2 }
+                'u' -> i = appendUnicodeEscape(s, i, sb)
+                else -> { sb.append(s[i + 1]); i += 2 } // \b, \f и прочее — по-простому
+            }
+        }
+        return sb.toString()
+    }
+
+    // 1.3.39 (доработка-28): обработка \uXXXX для jsonUnescape (возвращает
+    // новую позицию в строке).
+    private fun appendUnicodeEscape(s: String, start: Int, sb: StringBuilder): Int {
+        val cp1 = if (start + 6 <= s.length) s.substring(start + 2, start + 6).toIntOrNull(16) else null
+        // старшая половина суррогатной пары + сразу \uDC00… — сшиваем
+        if (cp1 != null && cp1 in 0xD800..0xDBFF && start + 12 <= s.length &&
+            s[start + 6] == '\\' && s[start + 7] == 'u'
+        ) {
+            val cp2 = s.substring(start + 8, start + 12).toIntOrNull(16)
+            if (cp2 != null && cp2 in 0xDC00..0xDFFF) {
+                sb.appendCodePoint(0x10000 + ((cp1 - 0xD800) shl 10) + (cp2 - 0xDC00))
+                return start + 12
+            }
+        }
+        if (cp1 != null) {
+            try {
+                sb.append(String(Character.toChars(cp1)))
+            } catch (_: Exception) {
+                sb.append(' ') // «рваная» суррогатная пара — пробел вместо неё
+            }
+            return start + 6
+        }
+        sb.append('u') // не шестнадцатеричное — оставляем букву как было
+        return start + 2
+    }
+
+    // 1.3.39 (доработка-28): ближайшее к center совпадение в окне — чтобы
+    // не взять поле СОСЕДНЕЙ записи, когда в окне их несколько.
+    private fun nearestIn(re: Regex, seg: String, center: Int): MatchResult? {
+        var best: MatchResult? = null
+        var bestDist = Int.MAX_VALUE
+        for (m in re.findAll(seg)) {
+            val d = Math.abs(m.range.first - center)
+            if (d < bestDist) {
+                best = m
+                bestDist = d
+            }
+        }
+        return best
     }
 
     private fun classify(text: String): Pair<String, String> = when {
@@ -184,6 +344,11 @@ class NotifyService : Service() {
             .setContentTitle(title)
             .setContentText(text.take(140))
             .setStyle(NotificationCompat.BigTextStyle().bigText(text.take(400)))
+            // 1.3.39 (доработка-28): оформление «как у мобильных браузеров» —
+            // Chrome показывает под телом уведомления сайт-источник.
+            .setSubText("vk.ru")
+            .setCategory(NotificationCompat.CATEGORY_SOCIAL) // реакции/комментарии/ответы
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)
             .setContentIntent(pi)
             .build()
@@ -252,6 +417,66 @@ class NotifyService : Service() {
             Regex("""data-notif-id="(\d+)"""),
             Regex("""id="notif_(\d+)"""),
             Regex("""notification_id["']?\s*[:=]\s*["']?(\d+)""")
+        )
+
+        // ---------- 1.3.39 (доработка-28): паттерны текста и очистка ----------
+
+        // Радиус окна-фоллбэка вокруг id записи (как раньше ±250, вынесено).
+        private const val SNIPPET_WINDOW = 250
+
+        // Радиус JSON-поиска вокруг id — JSON-блок записи может быть
+        // заметно длиннее текстового окна.
+        private const val JSON_TEXT_WINDOW = 600
+
+        // 1.3.39 (доработка-28): JSON-поля с текстом уведомления в состоянии
+        // записи/страницы (ищутся рядом с id). Значение — JSON-строка:
+        // после извлечения нужна jsonUnescape.
+        private val JSON_TEXT_PATTERNS = listOf(
+            Regex(""""(?:text|title|desc|body|summary)"\s*:\s*"((?:[^"\\]|\\.){5,300})"""")
+        )
+
+        // 1.3.39 (доработка-28): служебные слова и тайм-штампы страницы
+        // «Ответов», попадающие в окно-фоллбэк (пункты меню, кнопки,
+        // «Сейчас», «2 ч назад» и т.п.). Разметка VK меняется — список
+        // вынесен в константу, дополнять легко. Фразы («Показать ещё»)
+        // стоят РАНЬШЕ своих частей («Ещё»), иначе от фразы остаётся огрызок.
+        private val NOISE = Regex(
+            """(?<![а-яёa-z0-9_])(Сейчас|\d{1,2}\s?(?:минут(?:у|ы)?|мин|секунд(?:у|ы)?|сек|час(?:а|ов)?|ч|дн(?:я|ей)?)\.?\s?назад?|(?:\d{1,2}\.){2}\d{2,4}|Показать ещё|Показать перевод|Подписаться|Отписаться|Ответить|Перевести|Написать|Жалоба|Скрыть|Ещё)(?![а-яёa-z0-9_])""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.UNICODE_CASE)
+        )
+
+        // «Висячая» пунктуация после удалённых слов: «запись ,» → «запись,».
+        private val HANGING_PUNCT = Regex("""\s+([,.:;!?])""")
+
+        // 1.3.39 (доработка-28): блоки, убираемые ЦЕЛИКОМ (с телом) ДО снятия
+        // тегов; сами теги; пробельные последовательности.
+        private val SCRIPT_BLOCK = Regex("""(?is)<script\b[^>]*>.*?</script>""")
+        private val STYLE_BLOCK = Regex("""(?is)<style\b[^>]*>.*?</style>""")
+        private val TAGS = Regex("""<[^>]+>""")
+        private val WHITESPACE = Regex("""\s+""")
+
+        // 1.3.39 (доработка-28): HTML-сущности. Именованные перечислены
+        // ЯВНО (жадный «&[a-zA-Z]+;» захватил бы «&amp;amp;» целиком как
+        // неизвестное имя «ampamp» и не декодировал бы его вовсе); числовые —
+        // десятичные и шестнадцатеричные.
+        private val ENTITY_RE = Regex(
+            """&#(x[0-9a-fA-F]{1,6}|\d{1,7});|&(?:lt|gt|quot|apos|nbsp|laquo|raquo|mdash|ndash|hellip|amp);"""
+        )
+
+        // Таблица именованных сущностей (остальные — числовые). &nbsp;
+        // → обычный пробел, чтобы схлопываться с остальными пробелами.
+        private val NAMED_ENTITIES = mapOf(
+            "&lt;" to "<",
+            "&gt;" to ">",
+            "&quot;" to "\"",
+            "&apos;" to "'",
+            "&nbsp;" to " ",
+            "&laquo;" to "«",
+            "&raquo;" to "»",
+            "&mdash;" to "—",
+            "&ndash;" to "–",
+            "&hellip;" to "…",
+            "&amp;" to "&"
         )
 
         fun ensureChannels(ctx: Context) {

@@ -1,13 +1,19 @@
 package com.pikovk.browser.ui
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import android.text.SpannableString
+import android.text.Spanned
 import android.text.TextUtils
+import android.text.style.ForegroundColorSpan
+import android.text.style.RelativeSizeSpan
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
@@ -19,6 +25,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 
@@ -42,9 +50,36 @@ import java.util.concurrent.Executors
 // MANAGE_EXTERNAL_STORAGE / READ_EXTERNAL_STORAGE — осознанный
 // запасной вариант. Запасной DocumentsUI включается только при отказе
 // в разрешениях (MainActivity.launchFilesDialog) и в MODE_SAVE.
+// 1.3.39 (доработка-28): переработка дизайна строк и сортировка по
+// просьбе владельца. (1) Строка списка — ДВЕ строки текста: имя файла
+// жирным и серая строка «размер · дата изменения» (у папок — «Папка»);
+// перед именем — цветная метка типа «●» (SpannableString +
+// ForegroundColorSpan): изображения — зелёный, видео — фиолетовый,
+// аудио — голубой, pdf — красный, архивы — оранжевый, документы —
+// синий, apk — жёлтый, остальное — серый; выбранный файл — акцентное
+// имя с префиксом «✓ » и alpha ряда 1f. Пустая папка — строка
+// «Папка пуста», не ошибка. (2) Сортировка: кнопка «Сортировка: …»
+// в ряду кнопок, тап листает режимы «имя → тип → дата → имя»; папки
+// ВСЕГДА первыми (среди папок — по имени); режим хранится в private var
+// объекта-синглтона (роль companion-статики — живёт весь сеанс
+// приложения); смена режима сразу пересортирует уже загруженный listing
+// на UI-потоке, без повторного чтения файловой системы. Контакт
+// show(activity, multiple, onResult), «Прикрепить»/отмена, флаг finished,
+// доступ к хранилищу, лимит 500, старт в Download, «Вверх», FileProvider —
+// без изменений.
 object FilesDialog {
 
     private val io = Executors.newSingleThreadExecutor()
+
+    // 1.3.39 (доработка-28): режим сортировки списка. Хранится в private
+    // var объекта-синглтона (роль companion-статики): значение переживает
+    // закрытие диалога и живёт весь сеанс приложения. По умолчанию —
+    // «по имени», как вел себя прежний список.
+    private enum class SortMode(val title: String) {
+        NAME("имя"), TYPE("тип"), DATE("дата")
+    }
+
+    private var sortMode = SortMode.NAME
 
     // Лимит элементов на одну папку (как LIMIT в MediaGalleryDialog):
     // каталог с тысячами записей не должен подвешивать ListView;
@@ -142,9 +177,80 @@ object FilesDialog {
         }
     }
 
+    // 1.3.39 (доработка-28): расширение файла в нижнем регистре (без точки);
+    // у имени без точки — пустая строка. Нужно и для сортировки «по типу»,
+    // и для цвета метки «●».
+    private fun extOf(f: File): String {
+        val n = f.name
+        val dot = n.lastIndexOf('.')
+        return if (dot < 0) "" else n.substring(dot + 1).lowercase(Locale.getDefault())
+    }
+
+    // 1.3.39 (доработка-28): сортировка по текущему режиму sortMode.
+    // Раньше сортировки не было вовсе — был жёсткий порядок «папки первыми,
+    // внутри по имени». Теперь: ПАПКИ ВСЕГДА первыми (среди папок — по имени
+    // без учёта регистра), файлы — по режиму: NAME — A→Я без учёта регистра;
+    // TYPE — по расширению по алфавиту, внутри группы по имени; DATE — новые
+    // сверху (при равном времени — по имени, чтобы порядок был стабильным).
+    // Вызывается и при загрузке папки (в io-исполнителе, вместе с чтением
+    // ФС), и при смене режима на UI-потоке поверх уже загруженного listing —
+    // без повторного чтения файловой системы; элементов ≤ LIMIT, дёшево.
+    private fun sortChildren(children: ArrayList<File>) {
+        children.sortWith { a, b ->
+            if (a.isDirectory != b.isDirectory) {
+                // папка всегда раньше файла
+                if (a.isDirectory) -1 else 1
+            } else if (a.isDirectory) {
+                // среди папок — всегда по имени, независимо от режима
+                a.name.compareTo(b.name, ignoreCase = true)
+            } else {
+                when (sortMode) {
+                    SortMode.NAME -> a.name.compareTo(b.name, ignoreCase = true)
+                    SortMode.TYPE -> {
+                        val ea = extOf(a)
+                        val eb = extOf(b)
+                        if (ea != eb) ea.compareTo(eb)
+                        else a.name.compareTo(b.name, ignoreCase = true)
+                    }
+                    SortMode.DATE -> {
+                        val d = b.lastModified().compareTo(a.lastModified())
+                        if (d != 0) d else a.name.compareTo(b.name, ignoreCase = true)
+                    }
+                }
+            }
+        }
+    }
+
+    // 1.3.39 (доработка-28): цвет метки «●» перед именем — по расширению
+    // файла (типу). Папка — голубая метка, как «ссылка».
+    private fun dotColorFor(f: File): Int {
+        if (f.isDirectory) return 0xFF8AB4F8.toInt() // папка — голубой
+        return when (extOf(f)) {
+            "jpg", "png", "gif", "webp", "bmp", "heic" ->
+                0xFF81C995 // изображения — зелёный
+            "mp4", "mkv", "avi", "mov", "webm", "3gp" ->
+                0xFFC58AF9 // видео — фиолетовый
+            "mp3", "wav", "ogg", "m4a", "flac" ->
+                0xFF8AB4F8 // аудио — голубой
+            "pdf" ->
+                0xFFF28B82 // pdf — красный
+            "zip", "rar", "7z", "tar", "gz" ->
+                0xFFFDD663 // архивы — оранжевый
+            "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "txt" ->
+                0xFF8AB4F8 // документы — синий
+            "apk" ->
+                0xFFFFD54F // apk — жёлтый
+            else ->
+                0xFF9AA0A6 // остальное — серый
+        }.toInt()
+    }
+
     // Дети папки: null — listFiles()==null (нет доступа). Скрытые файлы
     // пропускаем, папки идут первыми, имена сравниваются без учёта
     // регистра; больше LIMIT — первые LIMIT с пометкой.
+    // 1.3.39 (доработка-28): порядок записей теперь задаёт session-режим
+    // sortMode через sortChildren — папки по-прежнему всегда первыми,
+    // имя без учёта регистра осталось запасным ключом во всех режимах.
     private fun readChildren(dir: File): Listing? {
         val kids = try {
             dir.listFiles()
@@ -156,10 +262,9 @@ object FilesDialog {
             if (f.name.startsWith(".")) continue
             out.add(f)
         }
-        out.sortWith(
-            compareByDescending<File> { it.isDirectory }
-                .thenComparator { a, b -> a.name.compareTo(b.name, ignoreCase = true) }
-        )
+        // 1.3.39 (доработка-28): единый компаратор — тот же, что и при
+        // пересортировке по тапу; режим берётся из session-переменной.
+        sortChildren(out)
         val total = out.size
         if (total > LIMIT) {
             out.subList(LIMIT, total).clear()
@@ -226,6 +331,12 @@ object FilesDialog {
         var listing = Listing(ArrayList<File>(), 0, false)
         var noAccess = false
 
+        // 1.3.39 (доработка-28): формат второй строки файла — дата изменения
+        // «дд.ММ.гггг ЧЧ:мм». SimpleDateFormat создаётся один на диалог и
+        // используется только с UI-потока (getView), поэтому без синхронизации;
+        // локаль — по умолчанию, как требовал владелец.
+        val dateFmt = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault())
+
         val pathView = TextView(activity).apply {
             setPadding(dp(16), dp(12), dp(16), 0)
             textSize = 12f
@@ -242,6 +353,13 @@ object FilesDialog {
             text = "Вверх"
             isEnabled = parentWithinTop(startCanonical, top) != null
         }
+        // 1.3.39 (доработка-28): кнопка сортировки в ряду кнопок, между
+        // «Вверх» и доступом; равные доли веса у всех кнопок ряда. Текущий
+        // режим виден в тексте («Сортировка: имя/тип/дата»); обработчик тапа
+        // вешается ниже, после создания adapter'а (он нужен для перерисовки).
+        val sortBtn = Button(activity).apply {
+            text = "Сортировка: ${sortMode.title}"
+        }
         val access = Button(activity).apply {
             text = "Дать доступ к файлам"
             visibility = if (hasStorageAccess(activity)) View.GONE else View.VISIBLE
@@ -251,6 +369,7 @@ object FilesDialog {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(8), dp(4), dp(8), dp(4))
             addView(up, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(sortBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(access, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
         val list = ListView(activity).apply {
@@ -263,38 +382,113 @@ object FilesDialog {
 
         fun rowOffset() = if (noAccess) 1 else 0
 
+        // 1.3.39 (доработка-28): +1 служебная строка «Папка пуста», когда
+        // доступ есть, а детей ноль — пустая папка не ошибка. С «Нет доступа…»
+        // не сочетается: noAccess приоритетнее (guard !noAccess), прежний
+        // список нечитаемой папки при noAccess по-прежнему виден ниже строки.
+        fun extraRow() = if (!noAccess && listing.children.isEmpty()) 1 else 0
+
+        // 1.3.39 (доработка-28): создание двухстрочной строки списка —
+        // вертикальный LinearLayout с двумя TextView. Первая строка — имя
+        // (жирным, светло-серый 15sp), вторая — «размер · дата изменения»
+        // (серый 12sp). Отступы чуть плотнее прежних 14dp: строк стало две.
+        fun makeRow(ctx: Context): LinearLayout {
+            val name = TextView(ctx).apply {
+                textSize = 15f
+                setTextColor(0xFFE0E0E0.toInt())
+                setTypeface(typeface, Typeface.BOLD)
+            }
+            val sub = TextView(ctx).apply {
+                textSize = 12f
+                setTextColor(0xFF9AA0A6.toInt())
+            }
+            return LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                addView(name)
+                addView(sub)
+            }
+        }
+
         val adapter = object : BaseAdapter() {
-            override fun getCount() = listing.children.size + rowOffset()
+            override fun getCount() = listing.children.size + rowOffset() + extraRow()
             override fun getItem(position: Int): File? = null
             override fun getItemId(position: Int) = position.toLong()
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val tv = convertView as? TextView
-                    ?: TextView(parent.context).apply {
-                        setPadding(dp(16), dp(14), dp(16), dp(14))
-                        textSize = 15f
-                        setTextColor(0xFFE0E0E0.toInt())
-                    }
+                // 1.3.39 (доработка-28): convertView — всегда тот же
+                // двухстрочный LinearLayout (ровно один тип строк): служебные
+                // строки «Нет доступа…» и «Папка пуста» рисуются в нём же,
+                // вторая строка прячется, — ListView переиспользует view
+                // без getViewTypeCount-логики.
+                val row = (convertView as? LinearLayout) ?: makeRow(parent.context)
+                val name = row.getChildAt(0) as TextView
+                val sub = row.getChildAt(1) as TextView
                 if (noAccess && position == 0) {
                     // единственная строка при отказе listFiles(): тап — повторить
-                    tv.text = "Нет доступа к папке — тапните, чтобы повторить"
-                    tv.setTextColor(0xFFE0E0E0.toInt())
-                    tv.paint.isFakeBoldText = true
-                    tv.alpha = 0.75f
-                    return tv
+                    name.text = "Нет доступа к папке — тапните, чтобы повторить"
+                    name.setTextColor(0xFFE0E0E0.toInt())
+                    sub.visibility = View.GONE
+                    row.alpha = 0.75f
+                    return row
                 }
+                if (extraRow() == 1 && position == 0) {
+                    // 1.3.39 (доработка-28): пустая папка — серая строка,
+                    // не ошибка; тапом не является.
+                    name.text = "Папка пуста"
+                    name.setTextColor(0xFF9AA0A6.toInt())
+                    sub.visibility = View.GONE
+                    row.alpha = 1f
+                    return row
+                }
+                sub.visibility = View.VISIBLE
                 val f = listing.children[position - rowOffset()]
-                if (f.isDirectory) {
-                    // папки — как ссылки: синие и жирные, имя со слэшем
-                    tv.text = f.name + "/"
-                    tv.setTextColor(0xFF8AB4F8.toInt())
-                    tv.paint.isFakeBoldText = true
+                val selected = f in sel
+                // 1.3.39 (доработка-28): перед именем — маленькая цветная
+                // метка типа «●» (SpannableString + ForegroundColorSpan,
+                // размер точки уменьшен RelativeSizeSpan); у выбранного
+                // файла перед меткой ещё префикс «✓ ».
+                val builder = StringBuilder()
+                if (selected) builder.append("✓ ")
+                val dotStart = builder.length
+                builder.append("●").append("  ")
+                // старое оформление папок сохранено: имя со слэшем
+                builder.append(if (f.isDirectory) f.name + "/" else f.name)
+                val label = SpannableString(builder)
+                label.setSpan(
+                    ForegroundColorSpan(dotColorFor(f)),
+                    dotStart,
+                    dotStart + 1,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                label.setSpan(
+                    RelativeSizeSpan(0.8f), // «маленький» символ метки
+                    dotStart,
+                    dotStart + 1,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                name.text = label
+                // 1.3.39 (доработка-28): имя выбранного файла — акцентное;
+                // папки остались «ссылками» (синими, как раньше); обычные
+                // файлы — светло-серые, как и было.
+                name.setTextColor(
+                    when {
+                        selected || f.isDirectory -> 0xFF8AB4F8.toInt()
+                        else -> 0xFFE0E0E0.toInt()
+                    }
+                )
+                // 1.3.39 (доработка-28): вторая строка. Файл — «размер ·
+                // дата изменения» (humanSize как был + SimpleDateFormat).
+                // Папка — «Папка»: подсчёт «N элементов» потребовал бы
+                // listFiles() каждой подпапки прямо на UI-потоке, берём
+                // дешёвый вариант из двух разрешённых владельцем.
+                sub.text = if (f.isDirectory) {
+                    "Папка"
                 } else {
-                    tv.text = f.name + " · " + humanSize(f.length())
-                    tv.setTextColor(0xFFE0E0E0.toInt())
-                    tv.paint.isFakeBoldText = false
+                    humanSize(f.length()) + " · " + dateFmt.format(Date(f.lastModified()))
                 }
-                tv.alpha = if (f in sel) 1f else 0.6f
-                return tv
+                // alpha ряда: выбранное — 1f, остальное — 0.6f, как раньше
+                row.alpha = if (selected) 1f else 0.6f
+                return row
             }
         }
         list.adapter = adapter
@@ -341,6 +535,23 @@ object FilesDialog {
             parentWithinTop(dir, top)?.let { open(it) }
         }
 
+        // 1.3.39 (доработка-28): тап по кнопке сортировки — цикл
+        // «имя → тип → дата → имя»; новый режим сразу пишется в
+        // session-переменную sortMode и показывается в тексте кнопки.
+        // Пересортировка уже загруженного listing идёт на UI-потоке,
+        // БЕЗ повторного чтения файловой системы (клеток ≤ LIMIT — дёшево),
+        // затем обычная перерисовка списка.
+        sortBtn.setOnClickListener {
+            sortMode = when (sortMode) {
+                SortMode.NAME -> SortMode.TYPE
+                SortMode.TYPE -> SortMode.DATE
+                SortMode.DATE -> SortMode.NAME
+            }
+            sortBtn.text = "Сортировка: ${sortMode.title}"
+            sortChildren(listing.children)
+            adapter.notifyDataSetChanged()
+        }
+
         val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             addView(pathView)
@@ -384,6 +595,9 @@ object FilesDialog {
                 open(dir) // повторная попытка чтения той же папки
                 return@setOnItemClickListener
             }
+            // 1.3.39 (доработка-28): служебная строка «Папка пуста» —
+            // тапом не является ни файлом, ни повтором чтения.
+            if (listing.children.isEmpty()) return@setOnItemClickListener
             val f = listing.children[position - rowOffset()]
             if (f.isDirectory) {
                 open(f)
