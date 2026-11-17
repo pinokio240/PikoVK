@@ -8,8 +8,10 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Message
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -197,6 +199,56 @@ class MainActivity : AppCompatActivity() {
                     showMediaGalleryNow(cb, params)
                 } else {
                     DiagLog.log(this, "галерея: разрешений нет — системный пикер")
+                    launchFileChooserNow(cb, params)
+                }
+            }
+        }
+
+    // 1.3.38 (доработка-27): отложенный колбэк собственного диалога файлов
+    // на время решения владельца о доступе к хранилищу (по образцу
+    // pendingMediaCallback/pendingMediaParams): Android 11+ — системный
+    // экран «Все файлы», Android 8–10 — READ_EXTERNAL_STORAGE. Повторный
+    // выбор файла гасит старые поля в startFileChooser: колбэку старой
+    // страницы к тому моменту уже доставлен onReceiveValue(null), и она
+    // не висит в ожидании.
+    private var pendingFilesCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingFilesParams: WebChromeClient.FileChooserParams? = null
+
+    // 1.3.38: возврат с системного экрана «Все файлы» (Android 11+).
+    // Доступ выдан — показываем собственный диалог файлов; отказ — откат
+    // на системный DocumentsUI (запасной путь, как в media-ветке).
+    private val allFilesPerm =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
+            val cb = pendingFilesCallback
+            val params = pendingFilesParams
+            pendingFilesCallback = null
+            pendingFilesParams = null
+            if (cb != null && params != null) {
+                if (Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()) {
+                    DiagLog.log(this, "файлы: полный доступ к хранилищу выдан — собственный диалог")
+                    showFilesDialogNow(cb, params)
+                } else {
+                    DiagLog.log(this, "файлы: полный доступ не выдан — системный пикер")
+                    launchFileChooserNow(cb, params)
+                }
+            }
+        }
+
+    // 1.3.38: READ_EXTERNAL_STORAGE для собственного диалога файлов на
+    // Android 8–10 (список файлов читается напрямую по ФС). Отказ —
+    // системный DocumentsUI, как в media-ветке.
+    private val filesStoragePerm =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            DiagLog.log(this, "файлы: разрешение хранилища granted=$granted")
+            val cb = pendingFilesCallback
+            val params = pendingFilesParams
+            pendingFilesCallback = null
+            pendingFilesParams = null
+            if (cb != null && params != null) {
+                if (granted) {
+                    showFilesDialogNow(cb, params)
+                } else {
+                    DiagLog.log(this, "файлы: разрешений нет — системный пикер")
                     launchFileChooserNow(cb, params)
                 }
             }
@@ -696,6 +748,12 @@ class MainActivity : AppCompatActivity() {
             pending.onReceiveValue(null) // предыдущий выбор отменяем
         }
         filePathCallback = callback
+        // 1.3.38 (доработка-27): отложенные «файловые» ветки разрешений
+        // гасим тоже — их колбэк уже получил null выше; иначе вернувшийся
+        // из настроек лаунчер поднял бы диалог для старого (уже
+        // отменённого) выбора.
+        pendingFilesCallback = null
+        pendingFilesParams = null
         // 1.3.33 (доработка-23): фото/видео — собственная галерея в обход
         // системных пикеров: журнал показал, что пикеры прошивки возвращают
         // пустой результат (RESULT_OK без файлов). MediaStore → напрямую
@@ -708,9 +766,10 @@ class MainActivity : AppCompatActivity() {
         }
         // 1.3.38 (доработка-27): документы и прочее (accept=*/*, пусто) —
         // собственный диалог файлов (FilesDialog) в обход сломанного на
-        // устройстве владельца DocumentsUI. Внутри диалога кнопка «Другие
-        // файлы…» открывает тот же DocumentsUI уже из стабильного состояния —
-        // потеря колбэка при пересоздании активити почти исключена.
+        // устройстве владельца DocumentsUI. Перед показом диалога — запрос
+        // доступа к хранилищу (см. launchFilesDialog); null-результат
+        // диалога — честная отмена странице, запасной DocumentsUI остаётся
+        // на отказе в разрешениях и MODE_SAVE.
         if (params.mode != WebChromeClient.FileChooserParams.MODE_SAVE) {
             return launchFilesDialog(callback, params)
         }
@@ -821,37 +880,107 @@ class MainActivity : AppCompatActivity() {
     // полностью внутри активити, как MediaGalleryDialog для фото. Список файлов
     // строится напрямую по ФС, выбранные отдаются странице как content:// через
     // FileProvider. Канал «результат активити» (в котором системные пикеры
-    // теряли результат при пересоздании) не используется вовсе. Кнопка
-    // «Другие файлы…» — запасной путь к произвольным файлам через DocumentsUI:
-    // пересоздание активити происходит уже ПОСЛЕ закрытия диалога, поэтому
-    // старый filePathCallback умирает вместе со старым WebView и не ломается.
+    // теряли результат при пересоздании) для передачи файлов не используется.
+    // 1.3.38 (правки после ревью): ПЕРЕД показом диалога запрашивается доступ
+    // к хранилищу (Android 11+ — системный экран «Все файлы», Android 8–10 —
+    // READ_EXTERNAL_STORAGE; отказ — откат на DocumentsUI); null-результат
+    // диалога — честная отмена странице (раньше «Отмена» вместо закрытия
+    // выкидывала системный пикер, а страница оставалась ждать ответа).
     private fun launchFilesDialog(
         callback: ValueCallback<Array<Uri>>,
         params: WebChromeClient.FileChooserParams
     ): Boolean {
+        // Требование владельца — «запрос разрешения для доступа к файлам».
+        // Android 11+: чтение произвольных файлов (Downloads/DCIM/...) даёт
+        // только полный доступ — MANAGE_EXTERNAL_STORAGE, экран «Все файлы».
+        // Android 8–10: достаточно READ_EXTERNAL_STORAGE.
+        if (Build.VERSION.SDK_INT >= 30) {
+            if (!Environment.isExternalStorageManager()) {
+                DiagLog.log(this, "файлы: полного доступа нет — запрос «Все файлы» (Android 11+)")
+                pendingFilesCallback = callback
+                pendingFilesParams = params
+                return launchAllFilesSettings()
+            }
+        } else {
+            if (
+                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                DiagLog.log(this, "файлы: READ_EXTERNAL_STORAGE нет — запрос (Android 8–10)")
+                pendingFilesCallback = callback
+                pendingFilesParams = params
+                filesStoragePerm.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+                return true
+            }
+        }
+        DiagLog.log(this, "файлы: доступ к хранилищу есть — собственный диалог")
+        showFilesDialogNow(callback, params)
+        return true
+    }
+
+    // Показ диалога файлов после подтверждённого (или не требующегося)
+    // доступа к хранилищу. Выделено, чтобы прямой путь и путь после запроса
+    // разрешения шли через один код — как launchFileChooserNow у пикера.
+    private fun showFilesDialogNow(
+        callback: ValueCallback<Array<Uri>>,
+        params: WebChromeClient.FileChooserParams
+    ) {
         val multiple = params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
         DiagLog.log(this, "файлы — собственный диалог (в обход системного пикера)")
         FilesDialog.show(this, multiple) { choice ->
-            when {
-                choice != null -> {
-                    filePathCallback = null
-                    DiagLog.log(this, "файлы: передано странице ${choice.size} файлов")
-                    Toast.makeText(
-                        this,
-                        "PikoVK: прикреплено файлов: ${choice.size}",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    callback.onReceiveValue(choice)
-                }
-                // Диалог закрыт «Другие файлы…» или файлов не нашлось — открыть
-                // системный DocumentsUI как запасной полноценный путь.
-                else -> {
-                    filePathCallback = callback
-                    launchFileChooserNow(callback, params)
-                }
+            if (choice != null) {
+                filePathCallback = null
+                DiagLog.log(this, "файлы: передано странице ${choice.size} файлов")
+                Toast.makeText(
+                    this,
+                    "PikoVK: прикреплено файлов: ${choice.size}",
+                    Toast.LENGTH_SHORT
+                ).show()
+                callback.onReceiveValue(choice)
+            } else {
+                // 1.3.38: null — отмена («Отмена»/закрытие диалога): страница
+                // не должна висеть в ожидании, как и в media-ветке. Запасной
+                // DocumentsUI остаётся на отказе в разрешениях и MODE_SAVE.
+                filePathCallback = null
+                DiagLog.log(this, "файлы: отменено владельцем")
+                callback.onReceiveValue(null)
             }
         }
-        return true
+    }
+
+    // Системный экран «Все файлы» (Android 11+): сначала точечный экран
+    // нашего приложения (package-Uri); на части прошивок действия нет —
+    // фоллбэк на общий экран управления доступом. Если не открыт и он —
+    // откат на системный DocumentsUI, страница не висит.
+    private fun launchAllFilesSettings(): Boolean {
+        return try {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+            DiagLog.log(this, "файлы: открываю системный экран «Все файлы»")
+            allFilesPerm.launch(intent)
+            true
+        } catch (e: ActivityNotFoundException) {
+            DiagLog.log(this, "файлы: точечный экран «Все файлы» не найден — общий экран")
+            try {
+                allFilesPerm.launch(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                true
+            } catch (e2: Exception) {
+                DiagLog.log(
+                    this,
+                    "файлы: экран разрешений недоступен (${e2.javaClass.simpleName}) — системный пикер"
+                )
+                val cb = pendingFilesCallback
+                val params = pendingFilesParams
+                pendingFilesCallback = null
+                pendingFilesParams = null
+                if (cb != null && params != null) {
+                    launchFileChooserNow(cb, params)
+                }
+                false
+            }
+        }
     }
 
     // Сборка intent и запуск системного пикера. Выделено из startFileChooser,

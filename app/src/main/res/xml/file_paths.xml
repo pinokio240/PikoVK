@@ -1,14 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 1.3.38 (доработка-27): пути, которые FileProvider отдаёт как content://
-     собственному диалогу файлов (FilesDialog). Корни совпадают с collectRoots:
-     external-files-path — специфичный каталог приложения (getExternalFilesDir),
-     external-path — стандартные Downloads/DCIM/Movies/Pictures/... плюс общий
-     внешний том. При изменении ListView-корней в FilesDialog.kt дополни сюда. -->
+     собственному диалогу файлов (FilesDialog). external-path — это
+     Environment.getExternalStorageDirectory(): «.» покрывает весь общий
+     внешний том (Download/DCIM/Movies/Pictures/Documents и любые подпапки,
+     куда ведёт навигация диалога — выше корня внешнего тома «Вверх» не
+     пускает). external-files-path — специфичный каталог приложения
+     (getExternalFilesDir) на случай старта диалога из него при отсутствии
+     внешнего тома. Прежние пять дублирующих external-path «.» убраны:
+     FileProvider берёт первый совпавший корень, остальные записи были
+     недостижимы. При изменении корней навигации в FilesDialog.kt дополни сюда. -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <external-files-path name="app_files" path="." />
-    <external-path name="shared_docs" path="." />
-    <external-path name="shared_downloads" path="." />
-    <external-path name="shared_dcim" path="." />
-    <external-path name="shared_movies" path="." />
-    <external-path name="shared_pictures" path="." />
+    <external-path name="shared_root" path="." />
 </paths>
