@@ -141,14 +141,27 @@ class ImPoller(private val context: Context) {
     }
 
     // 1.3.39 (доработка-28): фоллбэк — окно вокруг peer, но теперь через
-    // cleanWindow (script/style целиком, сущности, пробелы). Раньше отсюда
-    // же искали имя — теперь имя добывается структурно (findName).
+    // cleanWindow (script/style целиком, сущности, пробелы) и чистку шума
+    // (пункты меню VK, «Сейчас», «N мин назад» — общий список NOISE из
+    // NotifyService). Раньше отсюда же искали имя — теперь имя добывается
+    // структурно (findName).
     private fun snippetFor(peer: String, body: String): String {
         val idx = body.indexOf(peer)
         if (idx < 0) return ""
         val from = maxOf(0, idx - SNIPPET_WINDOW)
         val to = minOf(body.length, idx + SNIPPET_WINDOW)
-        return cleanWindow(body, from, to)
+        return cleanNoise(cleanWindow(body, from, to))
+    }
+
+    // 1.3.39 (доработка-28): вычистка служебных слов страницы из окна-
+    // фоллбэка — общий шаблон NOISE из NotifyService (границы слов через
+    // lookaround, см. комментарий там). После удаления склеиваем пробелы
+    // и «висячую» пунктуацию.
+    private fun cleanNoise(s: String): String {
+        var t = NotifyService.NOISE.replace(s, " ")
+        t = WHITESPACE.replace(t, " ").trim()
+        t = HANGING_PUNCT.replace(t) { m -> m.groupValues[1] }
+        return t.trim()
     }
 
     // 1.3.39 (доработка-28): окно сырого HTML → чистый текст. Сначала
@@ -446,6 +459,10 @@ class ImPoller(private val context: Context) {
         private val STYLE_BLOCK = Regex("""(?is)<style\b[^>]*>.*?</style>""")
         private val TAGS = Regex("""<[^>]+>""")
         private val WHITESPACE = Regex("""\s+""")
+
+        // «Висячая» пунктуация после удалённых слов шума: «запись ,» →
+        // «запись,» (чистка шума — cleanNoise, шаблон NOISE из NotifyService).
+        private val HANGING_PUNCT = Regex("""\s+([,.:;!?])""")
 
         // HTML-сущности. Именованные перечислены ЯВНО (жадный
         // «&[a-zA-Z]+;» захватил бы «&amp;amp;» целиком как неизвестное имя
