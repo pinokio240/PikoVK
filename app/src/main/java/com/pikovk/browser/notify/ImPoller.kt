@@ -344,10 +344,13 @@ class ImPoller(private val context: Context) {
             .setContentText(text.take(140))
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText.take(400)))
             // 1.3.39 (доработка-28): оформление «как у мобильных браузеров» —
-            // источник под телом, категория, приоритет, счётчик непрочитанных.
+            // источник под телом, категория, счётчик непрочитанных.
+            // 1.3.39 (фикс видимости): баннер и содержимое на экране
+            // блокировки — приоритет для старых Android, видимость PUBLIC.
             .setSubText("vk.ru")
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setNumber(count)
             .setAutoCancel(true)
             .setContentIntent(pi)

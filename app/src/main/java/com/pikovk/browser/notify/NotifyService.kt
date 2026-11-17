@@ -45,7 +45,9 @@ import kotlin.concurrent.thread
 // и только потом берётся окно-фоллбэк, из которого вычищаются служебные
 // слова и тайм-штампы страницы («Ответить», «Подписаться», «Сейчас»,
 // «2 ч назад» и т.п.). Оформление — как у мобильных браузеров: источник
-// «vk.ru» под телом, категория SOCIAL, приоритет DEFAULT.
+// «vk.ru» под телом, категория SOCIAL/MESSAGE; каналы контента создаются
+// с высокой важностью (баннер поверх экрана + вибрация), содержимое
+// уведомления разрешено на экране блокировки.
 class NotifyService : Service() {
 
     @Volatile private var running = false
@@ -348,7 +350,12 @@ class NotifyService : Service() {
             // Chrome показывает под телом уведомления сайт-источник.
             .setSubText("vk.ru")
             .setCategory(NotificationCompat.CATEGORY_SOCIAL) // реакции/комментарии/ответы
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            // 1.3.39 (фикс видимости): баннер поверх любого экрана и полное
+            // содержимое на экране блокировки — как у мобильных браузеров.
+            // Высокий приоритет — для Android до 8.0, где каналов нет;
+            // на новых важность задаёт канал (создаётся с высокой).
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             .setContentIntent(pi)
             .build()
@@ -393,10 +400,20 @@ class NotifyService : Service() {
     companion object {
         const val SERVICE_ID = 42
         const val CH_SERVICE = "vkb_service"
-        const val CHANNEL_REACTIONS = "vkb_reactions"
-        const val CHANNEL_COMMENTS = "vkb_comments"
-        const val CHANNEL_REPLIES = "vkb_replies"
-        const val CHANNEL_MESSAGES = "vkb_messages" // 1.3.20: личные сообщения
+
+        // 1.3.39 (фикс видимости): суффикс v2 у id каналов контента.
+        // Важность канала фиксируется при ПЕРВОМ создании и кодом больше
+        // не меняется; у тех, кто собрал раннюю 1.3.39, каналы остались
+        // со старой (средней) важностью — без баннера и без содержимого
+        // на экране блокировки. Новые каналы создаются с высокой важностью,
+        // старые удаляются в ensureChannels, чтобы не засорять настройки.
+        private val LEGACY_CHANNELS = listOf(
+            "vkb_reactions", "vkb_comments", "vkb_replies", "vkb_messages"
+        )
+        const val CHANNEL_REACTIONS = "vkb_reactions_v2"
+        const val CHANNEL_COMMENTS = "vkb_comments_v2"
+        const val CHANNEL_REPLIES = "vkb_replies_v2"
+        const val CHANNEL_MESSAGES = "vkb_messages_v2" // 1.3.20: личные сообщения
         private const val SEEN_FILE = "vkb_notify_seen"
         private const val POLL_MAX_BYTES = 2_000_000
 
@@ -450,17 +467,23 @@ class NotifyService : Service() {
             "Скрыть", "Ещё"
         )
 
-        // Тайм-штампы: «2 минуты назад», «5 ч назад», «1 мин. назад», а
-        // также даты «17.11.2026». Слова — через ci() (регистронезависимо).
-        // Падежные суффиксы — КАЖДЫЙ вариант отдельной веткой: «часа» —
-        // [аА], «часов» — [оО][вВ] (квантор на группе (?:[аА][оО][вВ])?
-        // не покрыл бы одиночное «а»: ? относится ко всей группе),
-        // «дня» — [яЯ], «дней» — [еЕ][йЙ].
+        // 1.3.39 (фикс видимости): форма слова задаётся ЯВНЫМ списком
+        // суффиксов — forms("час", "а", "ов") читается по-русски как
+        // «час», «часа», «часов». Никаких «необязательных» блоков поверх
+        // суффиксов: «необязательно» распространялось на весь блок целиком,
+        // и одиночная «а» в «2 часа назад» терялась. Каждая форма —
+        // отдельная ветка перечисления.
+        private fun forms(word: String, vararg suffixes: String): String =
+            (listOf("") + suffixes).map { ci(word + it) }.joinToString("|")
+
+        // Тайм-штампы страницы: «2 минуты назад», «5 ч назад», «1 мин. назад»,
+        // а также даты «17.11.2026». Точка после сокращения и пробел между
+        // числом и словом — отдельные необязательные знаки шаблона.
         private val NOISE_TIME =
-            "\\d{1,2}\\s?(?:" + ci("минут") + "(?:[уы])?|" + ci("мин") + "|" +
-            ci("секунд") + "(?:[уы])?|" + ci("сек") + "|" + ci("час") +
-            "(?:[аоАО][вВ]|[аА])?|" + ci("ч") + "|" + ci("дн") + "(?:[яЯ]|[еЕ][йЙ])?)" +
-            "\\.?\\s?" + ci("назад") + "|" + "(?:\\d{1,2}\\.){2}\\d{2,4}"
+            "\\d{1,2}\\s?(?:" + forms("минут", "у", "ы") + "|" + forms("мин") + "|" +
+            forms("секунд", "у", "ы") + "|" + forms("сек") + "|" + forms("час", "а", "ов") + "|" +
+            forms("ч") + "|" + forms("дн", "я", "ей") + ")\\.?\\s?" + ci("назад") + "|" +
+            "(?:\\d{1,2}\\.){2}\\d{2,4}"
 
         // 1.3.39 (доработка-28): вычистка шума — на границах слов. Lookaround
         // вместо \b: в Java-регулярках кириллица по умолчанию не «словесный»
@@ -530,13 +553,20 @@ class NotifyService : Service() {
         fun ensureChannels(ctx: Context) {
             val nmService: Any? = ctx.getSystemService(Context.NOTIFICATION_SERVICE)
             if (nmService !is NotificationManager) return // не на чем создавать каналы
-            fun channel(id: String, name: String, importance: Int) =
-                nmService.createNotificationChannel(NotificationChannel(id, name, importance))
+            // каналы прежней 1.3.39 удаляем: их важность заморожена системой
+            for (old in LEGACY_CHANNELS) nmService.deleteNotificationChannel(old)
+            fun channel(id: String, name: String, importance: Int) {
+                val ch = NotificationChannel(id, name, importance)
+                // 1.3.39 (фикс видимости): вибрация на контентных каналах —
+                // баннер с вибрацией, как у мобильных браузеров и мессенджеров
+                if (importance >= NotificationManager.IMPORTANCE_DEFAULT) ch.enableVibration(true)
+                nmService.createNotificationChannel(ch)
+            }
             channel(CH_SERVICE, ctx.getString(R.string.notif_channel_service), NotificationManager.IMPORTANCE_MIN)
-            channel(CHANNEL_REACTIONS, ctx.getString(R.string.notif_channel_reactions), NotificationManager.IMPORTANCE_DEFAULT)
-            channel(CHANNEL_COMMENTS, ctx.getString(R.string.notif_channel_comments), NotificationManager.IMPORTANCE_DEFAULT)
-            channel(CHANNEL_REPLIES, ctx.getString(R.string.notif_channel_replies), NotificationManager.IMPORTANCE_DEFAULT)
-            channel(CHANNEL_MESSAGES, ctx.getString(R.string.notif_channel_messages), NotificationManager.IMPORTANCE_DEFAULT)
+            channel(CHANNEL_REACTIONS, ctx.getString(R.string.notif_channel_reactions), NotificationManager.IMPORTANCE_HIGH)
+            channel(CHANNEL_COMMENTS, ctx.getString(R.string.notif_channel_comments), NotificationManager.IMPORTANCE_HIGH)
+            channel(CHANNEL_REPLIES, ctx.getString(R.string.notif_channel_replies), NotificationManager.IMPORTANCE_HIGH)
+            channel(CHANNEL_MESSAGES, ctx.getString(R.string.notif_channel_messages), NotificationManager.IMPORTANCE_HIGH)
         }
 
         fun start(ctx: Context) {
