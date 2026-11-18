@@ -158,7 +158,7 @@ UA и хост (m.vk.ru ↔ vk.ru) меняются ТОЛЬКО вместе, �
 
 | Компонент | Версия | Примечание |
 |---|---|---|
-| JDK | 17 | требуется для сборки (source/targetCompatibility 17) |
+| JDK | 17 или 21 | требуется для сборки (source/targetCompatibility 17); НЕ запускай Gradle на JDK 23/24/25 — см. «Сборка» |
 | Gradle | 8.7 | wrapper — ставится сам при первой синхронизации |
 | Android Gradle Plugin | 8.5.2 | |
 | Kotlin | 1.9.24 | плагин org.jetbrains.kotlin.android, jvmTarget 17 |
@@ -200,8 +200,41 @@ UA и хост (m.vk.ru ↔ vk.ru) меняются ТОЛЬКО вместе, �
 
 1. Android Studio: `File → Open` → папка `PikoVK`, дождаться синхронизации
    Gradle, `Run ▶`.
-2. Консоль: `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`.
+2. Консоль: `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`
+   (в PowerShell: `.\gradlew.bat assembleDebug`).
 3. Release: `./gradlew assembleRelease` (minify выключен).
+
+### Важно: Gradle — только на JDK 17 или 21
+
+Kotlin 1.9.24 и его lintVital не работают на JDK 23/24/25: встроенный в
+компилятор `JavaVersion.parse` падает с `IllegalArgumentException: <версия>`.
+Симптомы (случай с JDK 25.0.3): демон Kotlin теряет инкрементальные кэши
+(сами компиляции при этом выживают через fallback «без демона», только
+медленно), а релизная задача `:app:lintVitalAnalyzeRelease` валит сборку
+целиком («Already disposed: MessageBus», «> 25.0.3»); debug собирается.
+Проверить, на какой JVM идёт сборка: `gradlew -version` — Launcher/Daemon
+JVM должны быть 17 или 21.
+
+Если Gradle поднялся на JDK 25 (например, JAVA_HOME указывает на свежую
+Java), в PowerShell:
+
+```powershell
+.\gradlew.bat --stop
+Remove-Item -Recurse -Force app\build        # битые инкрементальные кэши
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"   # JBR 21
+.\gradlew.bat assemble
+```
+
+Закрепить навсегда — в `gradle.properties` (путь подставь свой; Android
+Studio кладёт JBR 21 в `C:\Program Files\Android\Android Studio\jbr`,
+годится и отдельно поставленный Temurin 17/21):
+
+```
+org.gradle.java.home=C:/Program Files/Android/Android Studio/jbr
+```
+
+В Android Studio то же самое: Settings → Build, Execution, Deployment →
+Build Tools → Gradle → «Gradle JDK» → выбрать jbr-21 (или JDK 17).
 
 Правила кода (проверяются при каждой доработке): в Kotlin запрещены `!!`,
 `?:`, `?.` и блочные комментарии `/* */` — только явные проверки null и
