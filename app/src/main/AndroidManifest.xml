@@ -129,5 +129,11 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- Сторож службы опроса: будильник раз в 15 минут возрождает
+             NotifyService, если прошивка прибила процесс (1.3.40) -->
+        <receiver
+            android:name=".notify.WatchdogReceiver"
+            android:exported="false" />
     </application>
 </manifest>

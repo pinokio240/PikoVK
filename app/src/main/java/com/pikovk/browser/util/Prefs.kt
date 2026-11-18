@@ -209,15 +209,20 @@ object Prefs {
         }
 
     // ---------- Фоновые уведомления ----------
+    // 1.3.40: мониторинг включён ИЗ КОРОБКИ (просьба владельца: «нет
+    // процесса, который следит за получением сообщений и уведомлений») —
+    // при первом открытии запрашивается разрешение на уведомления и
+    // стартует служба опроса. Отключается тумблерами в настройках.
     var notifyEnabled: Boolean
-        get() = sp.getBoolean("notify_enabled", false)
+        get() = sp.getBoolean("notify_enabled", true)
         set(v) {
             e().putBoolean("notify_enabled", v).apply()
         }
     // 1.3.20: отдельный тумблер уведомлений о личных сообщениях (мессенджер).
     // Служба общая с «Ответами»: живёт, пока включён хотя бы один тумблер.
+    // 1.3.40: включён из коробки — мониторинг сообщений работает сразу.
     var imNotifyEnabled: Boolean
-        get() = sp.getBoolean("im_notify_enabled", false)
+        get() = sp.getBoolean("im_notify_enabled", true)
         set(v) {
             e().putBoolean("im_notify_enabled", v).apply()
         }

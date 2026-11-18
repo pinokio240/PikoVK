@@ -12,6 +12,7 @@ class BootReceiver : BroadcastReceiver() {
             (Prefs.notifyEnabled || Prefs.imNotifyEnabled)
         ) {
             NotifyService.start(context)
+            WatchdogReceiver.schedule(context) // будильники не переживают перезагрузку
         }
     }
 }

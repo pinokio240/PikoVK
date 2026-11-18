@@ -70,11 +70,27 @@ class NotifyService : Service() {
             startForeground(SERVICE_ID, notification)
         }
         startWorker()
+        // 1.3.40: сторож — будильник, возрождающий службу, если процесс
+        // прибила прошивка; при каждом старте службы будильник переставляется.
+        WatchdogReceiver.schedule(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startWorker() // идемпотентно: если поток уже живёт, ничего не делает
+        WatchdogReceiver.schedule(this) // на случай, если будильник потерялся
         return START_STICKY
+    }
+
+    // 1.3.40: свайп приложения из «недавних» на части прошивок гасит и
+    // foreground-службу — явно перезапускаем себя, пока мониторинг включён
+    // (startForegroundService для уже foreground-службы безвреден), и
+    // перезаряжаем сторож.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        if (Prefs.notifyEnabled || Prefs.imNotifyEnabled) {
+            WatchdogReceiver.schedule(this)
+            start(this)
+        }
     }
 
     override fun onDestroy() {
@@ -575,6 +591,9 @@ class NotifyService : Service() {
         }
 
         fun stop(ctx: Context) {
+            // сторож снимается ТОЛЬКО здесь (ручная остановка): если службу
+            // остановила система, будильник наоборот остаётся — он её возродит
+            WatchdogReceiver.cancel(ctx)
             ctx.stopService(Intent(ctx, NotifyService::class.java))
         }
     }
