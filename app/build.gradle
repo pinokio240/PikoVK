@@ -30,6 +30,14 @@ android {
     kotlinOptions {
         jvmTarget = '17'
     }
+
+    // lintVital (release-проверка) не влияет на содержимое APK; воркер lint
+    // несовместим с JDK 24+/Gradle 8.7 и валил release-сборку (ошибка «25.0.3»).
+    // Ручная проверка кода остаётся доступной: ./gradlew lintDebug
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 }
 
 dependencies {
